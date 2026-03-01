@@ -1,16 +1,3 @@
-"""Data pipeline: Raw JSON -> clean DataFrames -> Parquet.
-
-Load, clean, normalize, validate, and save market data.
-
-Usage:
-    from src.data.pipeline import DataPipeline
-    pipe = DataPipeline()
-    markets = pipe.load_markets()        # DataFrame
-    prices = pipe.load_prices()          # DataFrame (long format)
-    trades = pipe.load_trades()          # DataFrame
-    pipe.build_all()                     # full pipeline -> parquet
-"""
-
 import json
 from pathlib import Path
 
@@ -24,15 +11,11 @@ log = get_logger(__name__)
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
-
 def _find_latest(subdir: str, prefix: str, suffix: str = ".json") -> Path | None:
-    """Find the latest file by timestamp in filename."""
     files = sorted((RAW_DIR / subdir).glob(f"{prefix}*{suffix}"))
     return files[-1] if files else None
 
-
 def _parse_prices(val) -> list[float] | None:
-    """Parse outcomePrices -- can be a JSON string or already a list."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return None
     if isinstance(val, list):
@@ -44,9 +27,7 @@ def _parse_prices(val) -> list[float] | None:
             return None
     return None
 
-
 def _parse_clob_ids(val) -> list[str]:
-    """Parse clobTokenIds -- JSON string or list."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return []
     if isinstance(val, list):
@@ -58,27 +39,14 @@ def _parse_clob_ids(val) -> list[str]:
             return []
     return []
 
-
 class DataPipeline:
-    """Raw data -> clean DataFrames -> Parquet."""
 
     def __init__(self, raw_dir: Path | str = RAW_DIR, processed_dir: Path | str = PROCESSED_DIR):
         self.raw_dir = Path(raw_dir)
         self.processed_dir = Path(processed_dir)
         self.processed_dir.mkdir(parents=True, exist_ok=True)
 
-    # ========== MARKETS ==========
-
     def load_markets(self, active: bool = True, resolved: bool = False) -> pd.DataFrame:
-        """Load markets_flat from raw JSON into a DataFrame.
-
-        Args:
-            active: load active markets
-            resolved: load resolved markets
-
-        Returns:
-            DataFrame with typed columns.
-        """
         dfs = []
 
         if active:
@@ -103,12 +71,10 @@ class DataPipeline:
         return df
 
     def _parse_markets_file(self, path: Path) -> pd.DataFrame:
-        """Parse a single markets_flat file."""
         with open(path) as f:
             data = json.load(f)
         df = pd.DataFrame(data)
 
-        # Numeric type coercion
         num_cols = [
             "volume", "volumeNum", "liquidity", "liquidityNum", "liquidityClob",
             "volume24hr", "volume1wk", "volume1mo", "volume1yr",
@@ -121,25 +87,21 @@ class DataPipeline:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Bool
         bool_cols = ["active", "closed", "negRisk", "acceptingOrders", "_event_neg_risk"]
         for col in bool_cols:
             if col in df.columns:
                 df[col] = df[col].astype(bool)
 
-        # Datetime
         dt_cols = ["endDate", "startDate", "createdAt", "updatedAt", "endDateIso", "startDateIso"]
         for col in dt_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
 
-        # Parse outcomePrices -> price_yes, price_no
         df["_outcome_prices"] = df["outcomePrices"].apply(_parse_prices)
         df["price_yes"] = df["_outcome_prices"].apply(lambda x: x[0] if x and len(x) >= 1 else np.nan)
         df["price_no"] = df["_outcome_prices"].apply(lambda x: x[1] if x and len(x) >= 2 else np.nan)
         df.drop(columns=["_outcome_prices"], inplace=True)
 
-        # Parse clobTokenIds -> list
         df["_clob_token_ids"] = df["clobTokenIds"].apply(_parse_clob_ids)
         df["token_id_yes"] = df["_clob_token_ids"].apply(lambda x: x[0] if len(x) >= 1 else None)
         df["token_id_no"] = df["_clob_token_ids"].apply(lambda x: x[1] if len(x) >= 2 else None)
@@ -147,13 +109,7 @@ class DataPipeline:
 
         return df
 
-    # ========== EVENTS ==========
-
     def load_events(self, active: bool = True, resolved: bool = False) -> pd.DataFrame:
-        """Load events from raw JSON.
-
-        Useful for obtaining tags and categories, which are stored at event level.
-        """
         dfs = []
 
         if active:
@@ -177,7 +133,6 @@ class DataPipeline:
         return df
 
     def _parse_events_file(self, path: Path) -> pd.DataFrame:
-        """Parse events JSON -> DataFrame (excluding nested markets)."""
         with open(path) as f:
             data = json.load(f)
 
@@ -199,7 +154,6 @@ class DataPipeline:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
 
-        # Extract tags as flat string (tags are stored as list of dicts)
         if "tags" in df.columns:
             df["_tags_flat"] = df["tags"].apply(
                 lambda x: ",".join(
@@ -209,16 +163,9 @@ class DataPipeline:
 
         return df
 
-    # ========== PRICES ==========
-
     def load_prices(self, fidelity: int = 60) -> pd.DataFrame:
-        """Load price time series from raw JSON + incremental JSONL.
-
-        Columns: token_id, timestamp, price
-        """
         rows = []
 
-        # 1. Legacy JSON files ({token_id: [history]})
         json_files = sorted((self.raw_dir / "prices").glob(f"prices_f{fidelity}_2*.json"))
         for path in json_files:
             log.info(f"Loading prices from {path.name}")
@@ -228,7 +175,6 @@ class DataPipeline:
                 for point in history:
                     rows.append({"token_id": token_id, "timestamp": point["t"], "price": point["p"]})
 
-        # 2. Incremental JSONL files ({token_id, history: [...]})
         jsonl_files = sorted((self.raw_dir / "prices").glob(f"prices_f{fidelity}_incremental_*.jsonl"))
         for path in jsonl_files:
             log.info(f"Loading incremental prices from {path.name}")
@@ -254,13 +200,9 @@ class DataPipeline:
         log.info(f"Prices loaded: {len(df)} points, {df['token_id'].nunique()} tokens")
         return df
 
-    # ========== TRADES ==========
-
     def load_trades(self) -> pd.DataFrame:
-        """Load trades from raw JSON + incremental JSONL."""
         rows = []
 
-        # 1. Legacy JSON files ({condition_id: [trades]})
         json_files = sorted((self.raw_dir / "trades").glob("trades_2*.json"))
         for path in json_files:
             log.info(f"Loading trades from {path.name}")
@@ -271,7 +213,6 @@ class DataPipeline:
                     trade["conditionId"] = condition_id
                     rows.append(trade)
 
-        # 2. Incremental JSONL files (each line is one trade dict)
         jsonl_files = sorted((self.raw_dir / "trades").glob("trades_incremental_*.jsonl"))
         for path in jsonl_files:
             log.info(f"Loading incremental trades from {path.name}")
@@ -296,7 +237,6 @@ class DataPipeline:
             df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
 
-        # Deduplicate (same trade may appear in both JSON and JSONL)
         id_cols = [c for c in ["id", "transactionHash", "timestamp", "conditionId"] if c in df.columns]
         if id_cols:
             df = df.drop_duplicates(subset=id_cols, keep="last")
@@ -305,13 +245,9 @@ class DataPipeline:
         log.info(f"Trades loaded: {len(df)} trades, {df['conditionId'].nunique()} markets")
         return df
 
-    # ========== ORDERBOOK SNAPSHOTS ==========
-
     def load_snapshots(self) -> pd.DataFrame:
-        """Load order book snapshots from JSONL (snapshots/ + orderbooks/)."""
         rows = []
 
-        # 1. Scheduler snapshots (data/raw/snapshots/orderbooks_*.jsonl)
         for pattern_dir, pattern in [
             (self.raw_dir / "snapshots", "orderbooks_*.jsonl"),
             (self.raw_dir / "orderbooks", "orderbooks_*.jsonl"),
@@ -342,36 +278,23 @@ class DataPipeline:
         log.info(f"Snapshots loaded: {len(df)} rows")
         return df
 
-    # ========== RESOLUTION OUTCOMES ==========
-
     def load_resolution_outcomes(self) -> pd.DataFrame:
-        """Extract resolution outcomes from resolved markets for Brier score / calibration.
-
-        Returns:
-            DataFrame: conditionId, question, outcome (1=Yes won, 0=No won),
-            lastTradePrice, volume, closedTime, category tags.
-        """
         markets = self.load_markets(active=False, resolved=True)
         if markets.empty:
             return pd.DataFrame()
 
-        # Filter: only closed markets with prices indicating resolution
         df = markets[markets["closed"] == True].copy()
 
-        # Determine outcome: price_yes ~1.0 = Yes won, price_yes ~0.0 = No won
         df["resolved_yes"] = df["price_yes"] >= 0.99
         df["resolved_no"] = df["price_no"] >= 0.99
         df["is_resolved"] = df["resolved_yes"] | df["resolved_no"]
         df = df[df["is_resolved"]].copy()
 
-        # outcome: 1 = Yes won, 0 = No won
         df["outcome"] = df["resolved_yes"].astype(int)
 
-        # closedTime
         if "closedTime" in df.columns:
             df["closedTime"] = pd.to_datetime(df["closedTime"], errors="coerce", utc=True)
 
-        # Select useful columns
         keep_cols = [
             "conditionId", "question", "outcome", "lastTradePrice",
             "volumeNum", "liquidityClob", "spread", "negRisk",
@@ -386,14 +309,7 @@ class DataPipeline:
                  f"(Yes won: {(df['outcome']==1).sum()}, No won: {(df['outcome']==0).sum()})")
         return df
 
-    # ========== VALIDATION ==========
-
     def validate(self, df: pd.DataFrame, name: str) -> dict:
-        """Basic DataFrame validation: missing values, duplicates, anomalies.
-
-        Returns:
-            dict with validation results
-        """
         report = {
             "name": name,
             "rows": len(df),
@@ -403,32 +319,28 @@ class DataPipeline:
             "anomalies": [],
         }
 
-        # Missing values
         missing = df.isnull().sum()
         missing = missing[missing > 0]
         report["missing"] = {col: int(cnt) for col, cnt in missing.items()}
 
-        # Duplicates (only on hashable columns)
         hashable_cols = [c for c in df.columns if df[c].apply(type).isin([list, dict]).sum() == 0]
         report["duplicates"] = int(df[hashable_cols].duplicated().sum()) if hashable_cols else 0
 
-        # Anomalies in numeric columns
         for col in df.select_dtypes(include=[np.number]).columns:
             series = df[col].dropna()
             if len(series) == 0:
                 continue
-            # Negative prices/volumes
+
             if col in ("price", "price_yes", "price_no", "volume", "volumeNum", "size"):
                 neg_count = (series < 0).sum()
                 if neg_count > 0:
                     report["anomalies"].append(f"{col}: {neg_count} negative values")
-            # Prices outside [0, 1] for prediction markets
+
             if col in ("price", "price_yes", "price_no", "bestBid", "bestAsk", "lastTradePrice"):
                 out_of_range = ((series < 0) | (series > 1)).sum()
                 if out_of_range > 0:
                     report["anomalies"].append(f"{col}: {out_of_range} values outside [0,1]")
 
-        # Log results
         log.info(f"Validation [{name}]: {report['rows']} rows, "
                  f"{len(report['missing'])} cols with nulls, "
                  f"{report['duplicates']} duplicates, "
@@ -438,14 +350,10 @@ class DataPipeline:
 
         return report
 
-    # ========== MERGE ==========
-
     def merge_markets_events(self, markets: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
-        """Add tags and categories from events into markets."""
         if events.empty or "_event_id" not in markets.columns:
             return markets
 
-        # Select needed columns from events
         event_cols = ["id"]
         if "_tags_flat" in events.columns:
             event_cols.append("_tags_flat")
@@ -457,12 +365,9 @@ class DataPipeline:
         log.info(f"Merged markets+events: {len(merged)} rows, added {len(event_cols)-1} cols from events")
         return merged
 
-    # ========== SAVE ==========
-
     def save_parquet(self, df: pd.DataFrame, name: str) -> Path:
-        """Save DataFrame to parquet."""
         path = self.processed_dir / f"{name}.parquet"
-        # Convert object columns with nested structures to strings for parquet
+
         df_save = df.copy()
         for col in df_save.columns:
             if df_save[col].dtype == object:
@@ -476,25 +381,17 @@ class DataPipeline:
         log.info(f"Saved {path} ({size_mb:.1f} MB, {len(df)} rows)")
         return path
 
-    # ========== BUILD ALL ==========
-
     def build_all(self, include_resolved: bool = False) -> dict[str, pd.DataFrame]:
-        """Full pipeline: load, clean, validate, merge, and save.
-
-        Returns:
-            dict with a DataFrame for each data type
-        """
         log.info("=" * 60)
         log.info("Starting full data pipeline")
         log.info("=" * 60)
 
         result = {}
 
-        # 1. Markets
         markets = self.load_markets(active=True, resolved=include_resolved)
         if not markets.empty:
             self.validate(markets, "markets")
-            # Merge with events for tags
+
             events = self.load_events(active=True, resolved=include_resolved)
             if not events.empty:
                 self.validate(events, "events")
@@ -504,21 +401,18 @@ class DataPipeline:
             self.save_parquet(markets, "markets")
             result["markets"] = markets
 
-        # 2. Prices
         prices = self.load_prices()
         if not prices.empty:
             self.validate(prices, "prices")
             self.save_parquet(prices, "prices")
             result["prices"] = prices
 
-        # 3. Trades
         trades = self.load_trades()
         if not trades.empty:
             self.validate(trades, "trades")
             self.save_parquet(trades, "trades")
             result["trades"] = trades
 
-        # 4. Resolution outcomes (from resolved markets)
         if include_resolved:
             outcomes = self.load_resolution_outcomes()
             if not outcomes.empty:
@@ -526,7 +420,6 @@ class DataPipeline:
                 self.save_parquet(outcomes, "resolution_outcomes")
                 result["resolution_outcomes"] = outcomes
 
-        # 5. Snapshots
         snapshots = self.load_snapshots()
         if not snapshots.empty:
             self.validate(snapshots, "snapshots")

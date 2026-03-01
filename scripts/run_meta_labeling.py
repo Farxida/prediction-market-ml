@@ -1,16 +1,3 @@
-"""
-Meta-Labeling Experiment — standalone script.
-López de Prado AFML Ch3 / ML for Asset Managers Ch5.
-
-Primary model: LGB → direction (UP/DOWN)
-Meta-model: LGB → P(primary is correct) → filter + bet sizing
-
-Experiments:
-1. Meta-labeling with primary model features
-2. Meta-labeling with additional context features
-3. Meta-filter: skip trades where P(correct) < threshold
-4. Bet sizing: P(correct) as position size weight
-"""
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -21,7 +8,6 @@ import json
 import time
 import sys
 
-# --- Config ---
 SEED = 42
 np.random.seed(SEED)
 
@@ -37,9 +23,6 @@ print("META-LABELING EXPERIMENT (López de Prado AFML Ch3)")
 print("=" * 70)
 sys.stdout.flush()
 
-# ============================================================
-# 1. DATA LOADING (same as focal loss / trend-scanning)
-# ============================================================
 print("\n=== 1. Loading data ===")
 sys.stdout.flush()
 t0 = time.time()
@@ -97,14 +80,10 @@ print(f"Dataset: {X_raw.shape[0]:,} samples, {n_tokens - n_skipped} tokens ({ela
 print(f"Class balance: UP={y.mean():.1%}, DOWN={1-y.mean():.1%}")
 sys.stdout.flush()
 
-# ============================================================
-# 2. FEATURE ENGINEERING
-# ============================================================
 print("\n=== 2. Feature engineering ===")
 sys.stdout.flush()
 
 def make_features(X_windows):
-    """Summary features from (n, 48, 4) windows"""
     n = X_windows.shape[0]
     feats = []
     names = []
@@ -115,12 +94,12 @@ def make_features(X_windows):
         feats.append(col.std(axis=1));  names.append(f'{f_name}_std')
         feats.append(col[:, -1] - col[:, 0]); names.append(f'{f_name}_change')
         feats.append(col[:, -1] - col.mean(axis=1)); names.append(f'{f_name}_dev')
-    # Extra: price level bins (meta-model cares about WHERE in [0,1])
+
     price_last = X_windows[:, -1, 0]
     feats.append(np.abs(price_last - 0.5)); names.append('price_extremity')
     feats.append((price_last > 0.9).astype(float)); names.append('near_one')
     feats.append((price_last < 0.1).astype(float)); names.append('near_zero')
-    # Volatility regime
+
     vol_last = X_windows[:, -1, 2]
     vol_mean = X_windows[:, :, 2].mean(axis=1)
     feats.append(np.where(vol_mean > 0, vol_last / (vol_mean + 1e-8), 0)); names.append('vol_ratio')
@@ -129,20 +108,15 @@ def make_features(X_windows):
 X_feat, feat_names = make_features(X_raw)
 print(f"Features: {len(feat_names)} ({feat_names[:5]}...)")
 
-# Time-based split
 n = len(X_feat)
-train_end = int(n * 0.60)   # 60% train primary
-val_end = int(n * 0.70)     # 10% train meta on val predictions
-meta_train_end = int(n * 0.85)  # 15% meta validation
-# remaining 15% = test
+train_end = int(n * 0.60)
+val_end = int(n * 0.70)
+meta_train_end = int(n * 0.85)
 
 print(f"Split: Primary train={train_end:,} | Meta train={val_end-train_end:,} | "
       f"Meta val={meta_train_end-val_end:,} | Test={n-meta_train_end:,}")
 sys.stdout.flush()
 
-# ============================================================
-# 3. TRAIN PRIMARY MODEL
-# ============================================================
 print("\n=== 3. Primary model (LGB) ===")
 sys.stdout.flush()
 
@@ -176,12 +150,10 @@ primary_model = lgb.train(
     callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)]
 )
 
-# Get primary predictions on ALL data (OOS for meta-model)
 primary_pred_all = primary_model.predict(X_feat)
 primary_direction = (primary_pred_all > 0.5).astype(int)
 primary_correct = (primary_direction == y).astype(float)
 
-# Primary model AUC on test
 test_mask = np.arange(n) >= meta_train_end
 auc_primary = roc_auc_score(y[test_mask], primary_pred_all[test_mask])
 acc_primary = accuracy_score(y[test_mask], primary_direction[test_mask])
@@ -197,41 +169,31 @@ print(f"  Meta-val:   {primary_correct[val_end:meta_train_end].mean():.1%}")
 print(f"  Test:       {primary_correct[meta_train_end:].mean():.1%}")
 sys.stdout.flush()
 
-# ============================================================
-# 4. META-MODEL FEATURES
-# ============================================================
 print("\n=== 4. Meta-model features ===")
 sys.stdout.flush()
 
 def make_meta_features(X_feat, primary_pred, feat_names):
-    """Create features for meta-model"""
     meta_feats = []
     meta_names = []
 
-    # Primary model output
     meta_feats.append(primary_pred)
     meta_names.append('primary_prob')
 
-    # Confidence = |p - 0.5| * 2 (0 = uncertain, 1 = confident)
     confidence = np.abs(primary_pred - 0.5) * 2
     meta_feats.append(confidence)
     meta_names.append('primary_confidence')
 
-    # Direction
     meta_feats.append((primary_pred > 0.5).astype(float))
     meta_names.append('primary_direction')
 
-    # All original features (market context matters for meta-labeling)
     for i, name in enumerate(feat_names):
         meta_feats.append(X_feat[:, i])
         meta_names.append(f'ctx_{name}')
 
-    # Interaction: confidence × price_extremity
     price_ext_idx = feat_names.index('price_extremity')
     meta_feats.append(confidence * X_feat[:, price_ext_idx])
     meta_names.append('conf_x_extremity')
 
-    # Interaction: confidence × volatility
     vol_idx = feat_names.index('volatility_last')
     meta_feats.append(confidence * X_feat[:, vol_idx])
     meta_names.append('conf_x_volatility')
@@ -242,21 +204,13 @@ X_meta, meta_names = make_meta_features(X_feat, primary_pred_all, feat_names)
 print(f"Meta features: {len(meta_names)}")
 sys.stdout.flush()
 
-# ============================================================
-# 5. EXPERIMENT 1: Meta-Labeling
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 1: Meta-Labeling (predict if primary is correct)")
 print("=" * 70)
 sys.stdout.flush()
 
-# Meta target: 1 if primary model was correct, 0 if wrong
 y_meta = primary_correct
 
-# Split for meta-model
-# Meta trains on [train_end:val_end] (OOS predictions from primary)
-# Meta validates on [val_end:meta_train_end]
-# Test on [meta_train_end:]
 X_meta_train = X_meta[train_end:val_end]
 y_meta_train = y_meta[train_end:val_end]
 X_meta_val = X_meta[val_end:meta_train_end]
@@ -269,7 +223,6 @@ print(f"Meta val:   {len(X_meta_val):,} (correct rate: {y_meta_val.mean():.1%})"
 print(f"Meta test:  {len(X_meta_test):,} (correct rate: {y_meta_test.mean():.1%})")
 sys.stdout.flush()
 
-# --- 1a: Meta-model (minimal: only primary output) ---
 print("\n--- 1a: Meta-model (minimal: primary_prob + confidence + direction) ---")
 minimal_cols = [meta_names.index(n) for n in ['primary_prob', 'primary_confidence', 'primary_direction']]
 X_mm_tr = X_meta_train[:, minimal_cols]
@@ -281,7 +234,7 @@ dtrain = lgb.Dataset(X_mm_tr, y_meta_train, feature_name=mm_names)
 dval = lgb.Dataset(X_mm_va, y_meta_val, feature_name=mm_names)
 
 meta_minimal = lgb.train(
-    {**LGB_PARAMS, 'is_unbalance': False},  # meta target is more balanced
+    {**LGB_PARAMS, 'is_unbalance': False},
     dtrain, num_boost_round=500,
     valid_sets=[dval],
     callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)]
@@ -292,7 +245,6 @@ auc_mm = roc_auc_score(y_meta_test, pred_mm)
 print(f"  Meta AUC (can it predict correctness?): {auc_mm:.4f}")
 sys.stdout.flush()
 
-# --- 1b: Meta-model (full: all features) ---
 print("\n--- 1b: Meta-model (full: all context features) ---")
 dtrain = lgb.Dataset(X_meta_train, y_meta_train, feature_name=meta_names)
 dval = lgb.Dataset(X_meta_val, y_meta_val, feature_name=meta_names)
@@ -308,7 +260,6 @@ pred_mf = meta_full.predict(X_meta_test)
 auc_mf = roc_auc_score(y_meta_test, pred_mf)
 print(f"  Meta AUC (full): {auc_mf:.4f}")
 
-# Feature importance for meta-model
 imp = pd.DataFrame({
     'feature': meta_names,
     'importance': meta_full.feature_importance(importance_type='gain')
@@ -318,9 +269,6 @@ for _, row in imp.head(10).iterrows():
     print(f"    {row['feature']:30s} {row['importance']:10.1f}")
 sys.stdout.flush()
 
-# ============================================================
-# 6. EXPERIMENT 2: Meta-Filter (skip low-confidence trades)
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 2: Meta-Filter (skip when P(correct) < threshold)")
 print("=" * 70)
@@ -333,16 +281,14 @@ direction_test = primary_direction[meta_train_end:]
 print(f"\n{'Filter':>20} | {'Kept':>7} | {'%Kept':>6} | {'WR':>6} | {'AUC':>6} | {'PnL/trade':>9}")
 print("-" * 75)
 
-# No filter baseline
 wr_nofilter = (direction_test == y_test).mean()
-# Simplified PnL: correct trade = +1, wrong = -1, flat-bet
+
 pnl_nofilter = (2 * (direction_test == y_test).astype(float) - 1).mean()
 auc_nofilter = roc_auc_score(y_test, pred_primary_test)
 print(f"{'No filter':<20} | {len(y_test):>7,} | {1.0:>5.1%} | {wr_nofilter:.4f} | {auc_nofilter:.4f} | {pnl_nofilter:>+8.4f}")
 
 results = {'no_filter': {'n': len(y_test), 'wr': float(wr_nofilter), 'auc': float(auc_nofilter), 'pnl_per_trade': float(pnl_nofilter)}}
 
-# Confidence filter (no meta-model, just |primary_pred - 0.5|)
 for conf_thr in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]:
     conf = np.abs(pred_primary_test - 0.5)
     mask = conf >= conf_thr
@@ -355,7 +301,6 @@ for conf_thr in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]:
     print(f"{'Conf≥'+str(conf_thr):<20} | {mask.sum():>7,} | {pct:>5.1%} | {wr:.4f} | {auc:.4f} | {pnl:>+8.4f}")
     results[f'conf_{conf_thr}'] = {'n': int(mask.sum()), 'wr': float(wr), 'auc': float(auc), 'pnl_per_trade': float(pnl)}
 
-# Meta-model filter
 print()
 for meta_thr in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]:
     mask = pred_mf >= meta_thr
@@ -370,32 +315,25 @@ for meta_thr in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]:
 
 sys.stdout.flush()
 
-# ============================================================
-# 7. EXPERIMENT 3: Bet Sizing with Meta-Label
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 3: Bet Sizing (P(correct) as weight)")
 print("=" * 70)
 sys.stdout.flush()
 
-# Flat bet: each trade = $1
 flat_pnl_per_trade = 2 * (direction_test == y_test).astype(float) - 1
 flat_total = flat_pnl_per_trade.sum()
 flat_sr = flat_pnl_per_trade.mean() / (flat_pnl_per_trade.std() + 1e-8)
 
-# Confidence-weighted: bet size = confidence (|pred - 0.5| * 2)
 conf_weight = np.abs(pred_primary_test - 0.5) * 2
 conf_pnl = flat_pnl_per_trade * conf_weight
 conf_total = conf_pnl.sum()
 conf_sr = conf_pnl.mean() / (conf_pnl.std() + 1e-8)
 
-# Meta-weighted: bet size = P(correct) from meta-model
 meta_weight = np.clip(pred_mf, 0, 1)
 meta_pnl = flat_pnl_per_trade * meta_weight
 meta_total = meta_pnl.sum()
 meta_sr = meta_pnl.mean() / (meta_pnl.std() + 1e-8)
 
-# Meta-filtered + meta-weighted (skip P(correct)<0.5, weight by P(correct))
 meta_mask = pred_mf >= 0.5
 if meta_mask.sum() > 0:
     mfw_pnl = flat_pnl_per_trade[meta_mask] * meta_weight[meta_mask]
@@ -414,15 +352,11 @@ print(f"{'Meta-weighted':<30} | {len(meta_pnl):>7,} | {meta_total:>+10.1f} | {me
 print(f"{'Meta-filtered + weighted':<30} | {mfw_n:>7,} | {mfw_total:>+10.1f} | {mfw_pnl.mean() if mfw_n > 0 else 0:>+8.4f} | {mfw_sr:>7.4f}")
 sys.stdout.flush()
 
-# ============================================================
-# 8. EXPERIMENT 4: Which trades does meta-model filter?
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 4: Analysis of meta-model decisions")
 print("=" * 70)
 sys.stdout.flush()
 
-# Where does meta-model disagree with "always trade"?
 high_meta = pred_mf >= 0.6
 low_meta = pred_mf < 0.5
 
@@ -441,7 +375,6 @@ if low_meta.sum() > 0:
     print(f"  Avg price: {price_test[low_meta].mean():.3f}")
     print(f"  Avg volatility: {vol_test[low_meta].mean():.4f}")
 
-# Price bins analysis
 print(f"\nWR by price level (with/without meta-filter P≥0.6):")
 bins = [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.0)]
 print(f"{'Price bin':>12} | {'All WR':>6} | {'N_all':>7} | {'Meta WR':>7} | {'N_meta':>7} | {'Delta':>7}")
@@ -462,9 +395,6 @@ for lo, hi in bins:
 
 sys.stdout.flush()
 
-# ============================================================
-# 9. SUMMARY
-# ============================================================
 print("\n" + "=" * 70)
 print("GRAND SUMMARY")
 print("=" * 70)
@@ -475,10 +405,8 @@ Meta-model AUC (can predict correctness): minimal={auc_mm:.4f}, full={auc_mf:.4f
 
 Key findings:""")
 
-# Is meta-model better than random?
 print(f"  Meta-model {'CAN' if auc_mf > 0.52 else 'CANNOT'} predict primary correctness (AUC={auc_mf:.4f})")
 
-# Does filtering help?
 best_filter = None
 best_improvement = 0
 for key, val in results.items():
@@ -497,14 +425,12 @@ if best_filter:
 else:
     print(f"  No filter improves WR significantly")
 
-# Bet sizing
 print(f"\n  Bet sizing Sharpe: flat={flat_sr:.4f}, conf-weighted={conf_sr:.4f}, meta-weighted={meta_sr:.4f}")
 best_sizing = max([('flat', flat_sr), ('confidence', conf_sr), ('meta', meta_sr)], key=lambda x: x[1])
 print(f"  Best sizing: {best_sizing[0]} (SR={best_sizing[1]:.4f})")
 
 sys.stdout.flush()
 
-# Save results
 output = {
     'primary': {'auc': float(auc_primary), 'acc': float(acc_primary), 'wr': float(wr_primary)},
     'meta_auc': {'minimal': float(auc_mm), 'full': float(auc_mf)},

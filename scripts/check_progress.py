@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""Quick check of data collection progress.
-
-Usage:
-    python scripts/check_progress.py          # one-shot status
-    python scripts/check_progress.py --watch   # live updates every 10s
-"""
 from __future__ import annotations
 
 import os
@@ -15,14 +8,12 @@ from pathlib import Path
 PROGRESS_DIR = Path("data/raw/.progress")
 RAW_DIR = Path("data/raw")
 
-
 def get_status():
-    # Read STATUS.txt if exists (written by collect_all.py reporter)
+
     status_file = PROGRESS_DIR / "STATUS.txt"
     if status_file.exists() and (time.time() - status_file.stat().st_mtime) < 120:
         return status_file.read_text()
 
-    # Fallback: compute from .done files
     lines = []
     lines.append(f"Collection Progress — {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 60)
@@ -45,7 +36,6 @@ def get_status():
         bar = "#" * filled + "." * (bar_len - filled)
         lines.append(f"  {name:15s} [{bar}] {done:>5}/{expected} ({pct:.0f}%)")
 
-    # File sizes
     lines.append("")
     lines.append("Output files:")
     for pattern, label in [
@@ -59,7 +49,6 @@ def get_status():
             mb = total_size / (1024 * 1024)
             lines.append(f"  {label:20s} {len(files)} files, {mb:.1f} MB")
 
-    # Process check
     lines.append("")
     pid_check = os.popen("pgrep -f 'collect_all.py' 2>/dev/null").read().strip()
     if pid_check:
@@ -68,7 +57,6 @@ def get_status():
         lines.append("Process: NOT RUNNING")
 
     return "\n".join(lines)
-
 
 def main():
     watch = "--watch" in sys.argv or "-w" in sys.argv
@@ -84,7 +72,6 @@ def main():
             pass
     else:
         print(get_status())
-
 
 if __name__ == "__main__":
     main()

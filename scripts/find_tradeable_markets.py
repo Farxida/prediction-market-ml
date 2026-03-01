@@ -1,18 +1,3 @@
-"""Find currently tradeable markets for paper trading.
-
-Scans active Polymarket markets and filters by:
-- Volume > threshold
-- Spread < threshold
-- Liquidity > threshold
-- Price in range (not too extreme)
-
-Outputs token IDs ready for paper_trader.py.
-
-Usage:
-    python scripts/find_tradeable_markets.py --top 50
-    python scripts/find_tradeable_markets.py --min-volume 10000 --max-spread 0.05
-"""
-
 import argparse
 import json
 
@@ -23,7 +8,6 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-
 def find_tradeable(
     min_volume: float = 10_000,
     max_spread: float = 0.05,
@@ -31,10 +15,8 @@ def find_tradeable(
     price_range: tuple = (0.05, 0.95),
     top_n: int = 50,
 ) -> list[dict]:
-    """Find tradeable active markets."""
     client = PolymarketClient()
 
-    # Fetch active events with markets
     log.info("Fetching active events...")
     events = []
     for offset in range(0, 1000, 100):
@@ -44,7 +26,6 @@ def find_tradeable(
         events.extend(batch)
     log.info(f"Fetched {len(events)} events")
 
-    # Extract markets
     markets = []
     for event in events:
         for market in event.get("markets", []):
@@ -53,7 +34,6 @@ def find_tradeable(
                 liquidity = float(market.get("liquidityClob", 0) or 0)
                 spread = float(market.get("spread", 1) or 1)
 
-                # Parse prices
                 prices_raw = market.get("outcomePrices", "[]")
                 if isinstance(prices_raw, str):
                     prices = json.loads(prices_raw)
@@ -61,7 +41,6 @@ def find_tradeable(
                     prices = prices_raw
                 yes_price = float(prices[0]) if prices else 0.5
 
-                # Parse token IDs
                 tokens_raw = market.get("clobTokenIds", "[]")
                 if isinstance(tokens_raw, str):
                     tokens = json.loads(tokens_raw)
@@ -71,7 +50,6 @@ def find_tradeable(
                 if not tokens:
                     continue
 
-                # Filter
                 if volume < min_volume:
                     continue
                 if spread > max_spread:
@@ -95,13 +73,11 @@ def find_tradeable(
             except (ValueError, IndexError, json.JSONDecodeError):
                 continue
 
-    # Sort by volume descending, take top N
     markets.sort(key=lambda m: m["volume"], reverse=True)
     markets = markets[:top_n]
 
     log.info(f"Found {len(markets)} tradeable markets")
     return markets
-
 
 def main():
     parser = argparse.ArgumentParser(description="Find tradeable Polymarket markets")
@@ -134,11 +110,9 @@ def main():
             json.dump(markets, f, indent=2)
         log.info(f"Saved to {args.output}")
 
-    # Also print token IDs for easy copy-paste
     token_ids = [m["token_id_yes"] for m in markets if m["token_id_yes"]]
     print(f"\n--- {len(token_ids)} token IDs for paper_trader ---")
-    print(" ".join(token_ids[:10]))  # First 10
-
+    print(" ".join(token_ids[:10]))
 
 if __name__ == "__main__":
     main()

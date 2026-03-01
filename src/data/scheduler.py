@@ -1,15 +1,3 @@
-"""Periodic data collection scheduler for Polymarket.
-
-Runs snapshot collection jobs at configurable intervals:
-- Order book snapshots (every N minutes)
-- Price snapshots (midpoints + spreads)
-- New market monitoring (detect newly created markets)
-
-Usage:
-    python -m src.data.scheduler --interval 15 --duration 1440
-    python -m src.data.scheduler --interval 5 --jobs orderbooks prices --duration 60
-"""
-
 import argparse
 import json
 import signal
@@ -25,29 +13,22 @@ log = get_logger(__name__)
 RAW_DIR = Path("data/raw")
 SNAPSHOTS_DIR = RAW_DIR / "snapshots"
 
-
 def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-
 def _date_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d")
-
 
 def _append_jsonl(path: Path, record: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-
 def load_markets(file_path: str) -> list[dict]:
-    """Load market list from top_markets_for_collection.json."""
     with open(file_path) as f:
         return json.load(f)
 
-
 def _parse_token_ids(markets: list[dict]) -> list[tuple[str, str]]:
-    """Extract (token_id, condition_id) pairs from markets."""
     pairs = []
     for m in markets:
         cid = m.get("conditionId", "")
@@ -58,16 +39,11 @@ def _parse_token_ids(markets: list[dict]) -> list[tuple[str, str]]:
                 pairs.append((tid, cid))
     return pairs
 
-
-# --- Snapshot Jobs ---
-
-
 def snapshot_orderbooks(
     client: PolymarketClient,
     token_pairs: list[tuple[str, str]],
     delay: float = 0.05,
 ) -> int:
-    """Collect order book snapshots for all tokens, append to daily JSONL."""
     out_path = SNAPSHOTS_DIR / f"orderbooks_{_date_str()}.jsonl"
     ts = time.time()
     count = 0
@@ -75,7 +51,7 @@ def snapshot_orderbooks(
     for token_id, cid in token_pairs:
         try:
             book = client.get_order_book(token_id)
-            # py-clob-client returns OrderBookSummary object
+
             if hasattr(book, "__dict__"):
                 book = book.__dict__
 
@@ -106,13 +82,11 @@ def snapshot_orderbooks(
     log.info(f"Orderbook snapshot: {count}/{len(token_pairs)} tokens → {out_path.name}")
     return count
 
-
 def snapshot_prices(
     client: PolymarketClient,
     token_pairs: list[tuple[str, str]],
     delay: float = 0.05,
 ) -> int:
-    """Collect midpoint prices for all tokens, append to daily JSONL."""
     out_path = SNAPSHOTS_DIR / f"prices_{_date_str()}.jsonl"
     ts = time.time()
     count = 0
@@ -136,21 +110,15 @@ def snapshot_prices(
     log.info(f"Price snapshot: {count}/{len(token_pairs)} tokens → {out_path.name}")
     return count
 
-
 def monitor_new_markets(
     client: PolymarketClient,
     known_ids: set[str],
 ) -> list[dict]:
-    """Check for new markets via Gamma API.
-
-    Fetches latest events sorted by creation, compares against known IDs.
-    Returns list of new market dicts and updates known_ids in-place.
-    """
     out_path = SNAPSHOTS_DIR / f"new_markets_{_date_str()}.jsonl"
     new_markets = []
 
     try:
-        # Fetch recent events (sorted by newest first)
+
         events = client.get_events(active=True, closed=False, limit=100, offset=0)
 
         for event in events:
@@ -170,33 +138,19 @@ def monitor_new_markets(
         log.info(f"Detected {len(new_markets)} new markets")
     return new_markets
 
-
-# --- Main Scheduler Loop ---
-
-
 def run_scheduler(
     markets_file: str = "data/processed/top_markets_for_collection.json",
     interval_minutes: int = 15,
     duration_minutes: int = 1440,
     jobs: list[str] | None = None,
 ):
-    """Run periodic data collection.
-
-    Args:
-        markets_file: path to JSON with market list
-        interval_minutes: minutes between snapshots
-        duration_minutes: total runtime in minutes (default 24h)
-        jobs: which jobs to run (orderbooks, prices, new_markets). Default: all.
-    """
     if jobs is None:
         jobs = ["orderbooks", "prices", "new_markets"]
 
-    # Load markets
     markets = load_markets(markets_file)
     token_pairs = _parse_token_ids(markets)
     log.info(f"Loaded {len(markets)} markets, {len(token_pairs)} tokens")
 
-    # Known market IDs (for new market detection)
     known_ids = {m.get("conditionId", "") for m in markets}
 
     client = PolymarketClient()
@@ -204,7 +158,6 @@ def run_scheduler(
     end_time = time.time() + duration_minutes * 60
     cycle = 0
 
-    # Graceful shutdown
     shutdown = False
 
     def _signal_handler(sig, frame):
@@ -234,7 +187,7 @@ def run_scheduler(
 
             if "new_markets" in jobs:
                 new = monitor_new_markets(client, known_ids)
-                # Optionally add new high-volume markets to tracking
+
                 for m in new:
                     vol = float(m.get("volume", 0) or 0)
                     if vol > 10_000:
@@ -251,7 +204,7 @@ def run_scheduler(
             log.info(f"Cycle {cycle} done in {elapsed:.1f}s, sleeping {sleep_time:.0f}s")
 
             if sleep_time > 0 and not shutdown:
-                # Sleep in small chunks so we can respond to shutdown signals
+
                 chunks = int(sleep_time / 5) + 1
                 for _ in range(chunks):
                     if shutdown:
@@ -262,7 +215,6 @@ def run_scheduler(
     finally:
         client.close()
         log.info(f"Scheduler stopped after {cycle} cycles")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Polymarket periodic data collector")
@@ -298,7 +250,6 @@ def main():
         duration_minutes=args.duration,
         jobs=args.jobs,
     )
-
 
 if __name__ == "__main__":
     main()

@@ -1,16 +1,3 @@
-"""NLP data collector: Polymarket comments + RSS news.
-
-Sources (all free):
-1. Polymarket Comments API (Gamma API /comments) -- 200 req/10s
-2. Google News RSS -- no API key needed
-3. Polymarket event titles -- for keyword matching
-
-Research basis:
-- Pre-event sentiment > post-event
-- Comments reflect crowd sentiment, early comments predict price
-- LLM not for buy/sell decisions (AI-Trader paper) -- use as features
-"""
-
 import json
 import time
 import xml.etree.ElementTree as ET
@@ -27,9 +14,7 @@ log = get_logger(__name__)
 
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 
-
 class CommentCollector:
-    """Collect Polymarket comments via Gamma API."""
 
     def __init__(self, output_dir: str = "data/raw/comments"):
         self.output_dir = Path(output_dir)
@@ -37,11 +22,6 @@ class CommentCollector:
         self._http = httpx.Client(timeout=30)
 
     def collect_for_event(self, event_id: int | str) -> list[dict]:
-        """Collect all comments for a specific event.
-
-        API requires: parent_entity_id + parent_entity_type=Event.
-        Response: list of dicts with body, createdAt, profile, etc.
-        """
         all_comments = []
         offset = 0
         while True:
@@ -74,10 +54,6 @@ class CommentCollector:
         self,
         event_ids: list[int | str],
     ) -> dict[str, list[dict]]:
-        """Collect comments for multiple events.
-
-        Returns: {event_id: [comments]}
-        """
         results = {}
         for i, eid in enumerate(event_ids):
             comments = self.collect_for_event(eid)
@@ -91,7 +67,6 @@ class CommentCollector:
         return results
 
     def save(self, comments: list[dict], filename: str | None = None):
-        """Save comments to JSONL."""
         if not filename:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"comments_{ts}.jsonl"
@@ -105,9 +80,7 @@ class CommentCollector:
     def close(self):
         self._http.close()
 
-
 class NewsCollector:
-    """Collect news via Google News RSS (no API key needed)."""
 
     def __init__(self, output_dir: str = "data/raw/news"):
         self.output_dir = Path(output_dir)
@@ -118,15 +91,6 @@ class NewsCollector:
         )
 
     def search(self, query: str, max_results: int = 20) -> list[dict]:
-        """Search Google News RSS for articles matching query.
-
-        Args:
-            query: search terms (e.g., "Trump election 2026")
-            max_results: max articles to return
-
-        Returns:
-            list of dicts with title, link, published, source
-        """
         url = f"{GOOGLE_NEWS_RSS}?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
         try:
             r = self._http.get(url)
@@ -164,17 +128,13 @@ class NewsCollector:
         market_titles: list[str],
         max_per_market: int = 10,
     ) -> dict[str, list[dict]]:
-        """Collect news for multiple market titles.
-
-        Extracts key terms from title for search query.
-        """
         results = {}
         for title in market_titles:
-            # Extract key terms (first 5 words, skip common words)
+
             query = self._extract_query(title)
             articles = self.search(query, max_results=max_per_market)
             results[title] = articles
-            time.sleep(1.0)  # polite rate limiting for RSS
+            time.sleep(1.0)
 
         total = sum(len(v) for v in results.values())
         log.info(f"Collected {total} articles for {len(market_titles)} markets")
@@ -182,7 +142,6 @@ class NewsCollector:
 
     @staticmethod
     def _extract_query(title: str) -> str:
-        """Extract search query from market title."""
         skip = {"will", "the", "a", "an", "be", "is", "are", "was", "were",
                 "by", "in", "on", "at", "to", "for", "of", "and", "or",
                 "before", "after", "this", "that", "these", "those"}
@@ -190,7 +149,6 @@ class NewsCollector:
         return " ".join(words[:6])
 
     def save(self, articles_by_market: dict[str, list[dict]], filename: str | None = None):
-        """Save news articles to JSONL."""
         if not filename:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"news_{ts}.jsonl"

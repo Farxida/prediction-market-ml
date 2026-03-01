@@ -1,12 +1,3 @@
-"""WebSocket real-time data collector for Polymarket.
-
-Connects to wss://ws-subscriptions-clob.polymarket.com/ws/market
-and records price_change, last_trade_price, book events to JSONL files.
-
-Usage:
-    python -m src.data.ws_collector --tokens-file data/processed/top_markets_for_collection.json --max-tokens 50
-"""
-
 import argparse
 import asyncio
 import json
@@ -21,27 +12,21 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-MAX_TOKENS_PER_CONNECTION = 450  # Polymarket limit ~500, leave margin
+MAX_TOKENS_PER_CONNECTION = 450
 PING_INTERVAL = 30
 RECONNECT_DELAY = 5
 DATA_DIR = Path("data/raw/websocket")
 
-
 def _output_path(prefix: str) -> Path:
-    """Create timestamped JSONL output file."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d")
     return DATA_DIR / f"{prefix}_{ts}.jsonl"
 
-
 def _append_jsonl(path: Path, record: dict):
-    """Append single JSON record to JSONL file."""
     with open(path, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-
 def load_token_ids(file_path: str, max_tokens: int = 50) -> list[str]:
-    """Load token IDs from top_markets_for_collection.json."""
     with open(file_path) as f:
         markets = json.load(f)
 
@@ -57,19 +42,11 @@ def load_token_ids(file_path: str, max_tokens: int = 50) -> list[str]:
     log.info(f"Loaded {len(token_ids)} token IDs from {len(markets)} markets")
     return token_ids
 
-
 async def collect_stream(
     token_ids: list[str],
     duration_seconds: int = 3600,
     output_prefix: str = "ws_stream",
 ):
-    """Connect to WebSocket and collect events.
-
-    Args:
-        token_ids: list of CLOB token IDs to subscribe to
-        duration_seconds: how long to collect (default 1 hour)
-        output_prefix: prefix for output JSONL file
-    """
     out_path = _output_path(output_prefix)
     end_time = time.time() + duration_seconds
     event_count = 0
@@ -83,7 +60,7 @@ async def collect_stream(
                 ping_timeout=10,
                 close_timeout=5,
             ) as ws:
-                # Subscribe
+
                 sub_msg = json.dumps({
                     "assets_ids": token_ids,
                     "type": "market",
@@ -100,7 +77,6 @@ async def collect_stream(
 
                     recv_ts = time.time()
 
-                    # Parse — can be list (book initial) or dict (price_change)
                     try:
                         data = json.loads(raw)
                     except json.JSONDecodeError:
@@ -141,7 +117,7 @@ async def collect_stream(
                                 event_count += 1
 
                         elif event_type == "book":
-                            # bids/asks = [{"price": "0.55", "size": "100"}, ...]
+
                             bids = msg.get("bids", [])
                             asks = msg.get("asks", [])
                             rec = {
@@ -170,7 +146,6 @@ async def collect_stream(
     log.info(f"Collection complete: {event_count:,} events in {out_path}")
     return event_count
 
-
 def main():
     parser = argparse.ArgumentParser(description="Polymarket WebSocket collector")
     parser.add_argument(
@@ -188,7 +163,6 @@ def main():
     log.info(f"Starting WebSocket collector: {len(token_ids)} tokens, {args.duration}s")
     count = asyncio.run(collect_stream(token_ids, args.duration, args.prefix))
     log.info(f"Finished: {count:,} events collected")
-
 
 if __name__ == "__main__":
     main()

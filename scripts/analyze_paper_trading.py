@@ -1,7 +1,3 @@
-"""
-Paper Trading Analysis — полный анализ всех инстансов VPS
-Запуск: python scripts/analyze_paper_trading.py
-"""
 import json
 import os
 import re
@@ -10,7 +6,6 @@ from datetime import datetime, timedelta
 
 DATA_DIR = "logs/paper_trading_vps/paper_trading"
 
-# Category keywords (same as paper_trader.py)
 CATEGORY_KEYWORDS = {
     "sports": [
         "nba", "nfl", "nhl", "mlb", "mls", "epl", "premier league",
@@ -55,7 +50,6 @@ CATEGORY_KEYWORDS = {
     ],
 }
 
-
 def classify_category(question: str) -> str:
     q = question.lower()
     for cat, keywords in CATEGORY_KEYWORDS.items():
@@ -64,9 +58,7 @@ def classify_category(question: str) -> str:
                 return cat
     return "other"
 
-
 def load_instance(path: str, name: str) -> dict:
-    """Load checkpoint and trades for an instance."""
     cp_path = os.path.join(path, "checkpoint.json")
     if not os.path.exists(cp_path):
         return None
@@ -79,11 +71,9 @@ def load_instance(path: str, name: str) -> dict:
     cash = cp.get("cash", 0)
     initial = cp.get("initial_capital", 1000)
 
-    # Reclassify categories from question
     for t in trades:
         t["cat_fixed"] = classify_category(t.get("market_question", ""))
 
-    # Find latest equity file
     equity_files = sorted(
         [f for f in os.listdir(path) if f.startswith("paper_equity_") and f.endswith(".csv")],
         key=lambda x: os.path.getmtime(os.path.join(path, x)),
@@ -97,7 +87,7 @@ def load_instance(path: str, name: str) -> dict:
             lines = f.readlines()
             if len(lines) > 1:
                 last_line = lines[-1].strip().split(",")
-                # time,cash,n_positions,invested,equity,total_pnl,n_trades,win_rate,mtm_equity
+
                 if len(last_line) >= 9:
                     mtm_equity = float(last_line[8]) if last_line[8] else None
 
@@ -111,9 +101,7 @@ def load_instance(path: str, name: str) -> dict:
         "n_trades": len(trades),
     }
 
-
 def analyze_trades(trades: list) -> dict:
-    """Detailed trade analysis."""
     if not trades:
         return {"n": 0}
 
@@ -126,7 +114,6 @@ def analyze_trades(trades: list) -> dict:
     avg_loss = sum(t["pnl"] for t in losses) / len(losses) if losses else 0
     pf = abs(sum(t["pnl"] for t in wins) / sum(t["pnl"] for t in losses)) if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
 
-    # Max drawdown from cumulative PnL
     cum_pnl = 0
     peak = 0
     max_dd = 0
@@ -136,7 +123,6 @@ def analyze_trades(trades: list) -> dict:
         dd = peak - cum_pnl
         max_dd = max(max_dd, dd)
 
-    # Fees
     total_fees = sum(t.get("entry_fee", 0) + t.get("exit_fee", 0) for t in trades)
     gross_pnl = total_pnl + total_fees
 
@@ -154,20 +140,15 @@ def analyze_trades(trades: list) -> dict:
         "avg_pnl": total_pnl / len(trades),
     }
 
-
 def print_separator(title: str):
     print(f"\n{'='*70}")
     print(f"  {title}")
     print(f"{'='*70}")
 
-
 def main():
-    # =========================================================================
-    # 1. Load all instances
-    # =========================================================================
+
     instances = {}
 
-    # Main (root level)
     main_data = {
         "name": "main_old",
         "trades": [],
@@ -189,7 +170,6 @@ def main():
             t["cat_fixed"] = classify_category(t.get("market_question", ""))
     instances["main_old"] = main_data
 
-    # Sub-instances
     for dirname in os.listdir(DATA_DIR):
         full = os.path.join(DATA_DIR, dirname)
         if os.path.isdir(full) and dirname not in (".", ".."):
@@ -197,14 +177,12 @@ def main():
             if inst and inst["n_trades"] > 0:
                 instances[dirname] = inst
 
-    # Also try main_raw
     main_raw_path = os.path.join(DATA_DIR, "main_raw")
     if os.path.isdir(main_raw_path):
         inst = load_instance(main_raw_path, "main_raw")
         if inst:
             instances["main_raw"] = inst
 
-    # Merge main_old + main_raw = main_combined
     if "main_old" in instances and "main_raw" in instances:
         combined_trades = instances["main_old"]["trades"] + instances["main_raw"]["trades"]
         instances["main_combined"] = {
@@ -217,9 +195,6 @@ def main():
             "n_trades": len(combined_trades),
         }
 
-    # =========================================================================
-    # 2. Overview table
-    # =========================================================================
     print_separator("1. OVERVIEW — ALL INSTANCES")
     print(f"\n{'Instance':<18} {'Trades':>6} {'PnL':>10} {'WR%':>6} {'AvgPnL':>8} {'MaxDD':>8} {'Fees':>8} {'PF':>6}")
     print("-" * 82)
@@ -232,9 +207,6 @@ def main():
         pf_str = f"{stats['pf']:.2f}" if stats["pf"] < 100 else "inf"
         print(f"{name:<18} {stats['n']:>6} {stats['pnl']:>+10.2f} {stats['wr']:>5.1f}% {stats['avg_pnl']:>+8.2f} {stats['max_dd']:>8.2f} {stats['fees']:>8.2f} {pf_str:>6}")
 
-    # =========================================================================
-    # 3. MAIN COMBINED — detailed analysis
-    # =========================================================================
     main_key = "main_combined" if "main_combined" in instances else "main_old"
     main = instances[main_key]
     trades = main["trades"]
@@ -253,9 +225,6 @@ def main():
         pf_str = f"{stats['pf']:.2f}" if stats["pf"] < 100 else "inf"
         print(f"{cat:<15} {stats['n']:>6} {stats['pnl']:>+10.2f} {stats['wr']:>5.1f}% {stats['avg_pnl']:>+8.2f} {stats['avg_win']:>+8.2f} {stats['avg_loss']:>+9.2f} {pf_str:>6}")
 
-    # =========================================================================
-    # 4. PnL by PRICE ZONE
-    # =========================================================================
     print_separator("3. MAIN — PnL BY PRICE ZONE (entry price)")
 
     zones = {
@@ -268,7 +237,6 @@ def main():
         "90-100¢": (0.90, 1.00),
     }
 
-    # Use actual entry price (for YES: entry_price, for NO: 1-entry_price effective)
     print(f"\n{'Zone':<12} {'Trades':>6} {'PnL':>10} {'WR%':>6} {'AvgPnL':>8} {'Fees':>8}")
     print("-" * 56)
 
@@ -279,9 +247,6 @@ def main():
         stats = analyze_trades(zone_trades)
         print(f"{zone_name:<12} {stats['n']:>6} {stats['pnl']:>+10.2f} {stats['wr']:>5.1f}% {stats['avg_pnl']:>+8.2f} {stats['fees']:>8.2f}")
 
-    # =========================================================================
-    # 5. PnL by EXIT REASON
-    # =========================================================================
     print_separator("4. MAIN — PnL BY EXIT REASON")
 
     exit_groups = defaultdict(list)
@@ -314,9 +279,6 @@ def main():
         stats = analyze_trades(exit_groups[group])
         print(f"{group:<22} {stats['n']:>6} {stats['pnl']:>+10.2f} {stats['wr']:>5.1f}% {stats['avg_pnl']:>+8.2f}")
 
-    # =========================================================================
-    # 6. PnL by SIDE (YES vs NO)
-    # =========================================================================
     print_separator("5. MAIN — PnL BY SIDE")
 
     for side in ["YES", "NO"]:
@@ -325,9 +287,6 @@ def main():
             stats = analyze_trades(side_trades)
             print(f"{side}: {stats['n']} trades, PnL={stats['pnl']:+.2f}, WR={stats['wr']:.1f}%, Avg={stats['avg_pnl']:+.2f}")
 
-    # =========================================================================
-    # 7. TOP WINNERS and LOSERS
-    # =========================================================================
     print_separator("6. TOP 10 WINNERS")
 
     sorted_by_pnl = sorted(trades, key=lambda t: t["pnl"], reverse=True)
@@ -342,9 +301,6 @@ def main():
     for t in sorted_by_pnl[-10:]:
         print(f"{t['pnl']:>+8.2f} {t['cat_fixed']:<12} {t['side']:<4} {t['entry_price']:>6.3f} {t['exit_price']:>6.3f} {t.get('exit_reason','')[:25]:<25} {t['market_question'][:40]}")
 
-    # =========================================================================
-    # 8. HOLDING TIME analysis
-    # =========================================================================
     print_separator("8. HOLDING TIME ANALYSIS")
 
     hold_times = []
@@ -365,7 +321,6 @@ def main():
         print(f"Min hold:    {min(holds):.2f}h")
         print(f"Max hold:    {max(holds):.1f}h")
 
-        # PnL by hold time bucket
         buckets = {"<1h": (0, 1), "1-3h": (1, 3), "3-6h": (3, 6), "6-12h": (6, 12), "12h+": (12, 999)}
         print(f"\n{'Hold Time':<10} {'Trades':>6} {'PnL':>10} {'WR%':>6}")
         print("-" * 38)
@@ -377,9 +332,6 @@ def main():
                 wr = sum(1 for _, p in bucket if p > 0) / n * 100
                 print(f"{bname:<10} {n:>6} {pnl:>+10.2f} {wr:>5.1f}%")
 
-    # =========================================================================
-    # 9. CATEGORY × PRICE ZONE matrix
-    # =========================================================================
     print_separator("9. CATEGORY × PRICE ZONE (PnL)")
 
     cats_ordered = sorted(cat_trades.keys(), key=lambda c: sum(t["pnl"] for t in cat_trades[c]), reverse=True)
@@ -401,9 +353,6 @@ def main():
         row += f"{total:>+8.1f}({len(cat_trades[cat]):>2})"
         print(row)
 
-    # =========================================================================
-    # 10. A/B TEST comparison
-    # =========================================================================
     print_separator("10. A/B TEST COMPARISON")
 
     ab_names = ["sports_only", "inverse", "high_edge", "quarter_kelly",
@@ -421,7 +370,6 @@ def main():
             continue
         stats = analyze_trades(inst["trades"])
 
-        # Best category
         ab_cats = defaultdict(float)
         for t in inst["trades"]:
             ab_cats[t["cat_fixed"]] += t["pnl"]
@@ -429,9 +377,6 @@ def main():
 
         print(f"{name:<16} {stats['n']:>6} {stats['pnl']:>+10.2f} {stats['wr']:>5.1f}% {stats['avg_pnl']:>+8.2f} {stats['max_dd']:>8.2f} {best_cat:<12}")
 
-    # =========================================================================
-    # 11. SPECIFIC MARKET analysis (repeat markets)
-    # =========================================================================
     print_separator("11. MARKETS TRADED MULTIPLE TIMES")
 
     market_trades = defaultdict(list)
@@ -449,9 +394,6 @@ def main():
             wr = sum(1 for t in ts if t["pnl"] > 0) / len(ts) * 100
             print(f"{q:<50} {len(ts):>6} {pnl:>+10.2f} {wr:>5.1f}%")
 
-    # =========================================================================
-    # 12. SUMMARY & RECOMMENDATIONS
-    # =========================================================================
     print_separator("12. SUMMARY & RECOMMENDATIONS")
 
     stats = analyze_trades(trades)
@@ -463,13 +405,11 @@ def main():
     print(f"Max drawdown:  ${stats['max_dd']:.2f}")
     print(f"Total fees:    ${stats['fees']:.2f} ({stats['fees_pct']:.0f}% of gross)")
 
-    # Best/worst
     best_cat = max(cat_trades.keys(), key=lambda c: sum(t["pnl"] for t in cat_trades[c]))
     worst_cat = min(cat_trades.keys(), key=lambda c: sum(t["pnl"] for t in cat_trades[c]))
     print(f"\nBest category:  {best_cat} (${sum(t['pnl'] for t in cat_trades[best_cat]):+.2f})")
     print(f"Worst category: {worst_cat} (${sum(t['pnl'] for t in cat_trades[worst_cat]):+.2f})")
 
-    # Category recommendations
     print("\n--- ACTIONABLE ---")
     for cat in cats_ordered:
         pnl = sum(t["pnl"] for t in cat_trades[cat])
@@ -480,7 +420,6 @@ def main():
             print(f"  ✗ {cat}: EXCLUDE (${pnl:+.2f}, {n} trades)")
         else:
             print(f"  ? {cat}: INSUFFICIENT DATA (${pnl:+.2f}, {n} trades)")
-
 
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)) + "/..")

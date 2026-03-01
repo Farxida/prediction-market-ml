@@ -1,18 +1,3 @@
-"""Sentiment analysis pipeline for Polymarket NLP features.
-
-Models:
-- ProsusAI/finbert: financial domain, trained on 10K/10Q SEC filings
-- distilbert-base-uncased-finetuned-sst-2-english: general sentiment (fallback)
-
-Design decisions:
-- AI-Trader paper: LLM should not make buy/sell decisions -- use sentiment as FEATURE
-- FinBERT > general BERT for financial text (domain-specific pre-training)
-- Batch processing for efficiency (not real-time per comment)
-- MPS (Apple Silicon GPU) acceleration
-
-Output: sentiment scores (-1 to +1) for each text, plus aggregated features.
-"""
-
 import os
 from dataclasses import dataclass
 
@@ -22,25 +7,16 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Fix torch MPS duplicate lib issue on macOS
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 
 @dataclass
 class SentimentResult:
-    """Single text sentiment result."""
     text: str
-    label: str           # "positive", "negative", "neutral"
-    score: float         # confidence 0-1
-    sentiment: float     # -1 to +1 (negative to positive)
-
+    label: str
+    score: float
+    sentiment: float
 
 class SentimentAnalyzer:
-    """FinBERT-based sentiment analysis with MPS acceleration.
-
-    Uses ProsusAI/finbert (financial domain) as primary model.
-    Falls back to distilbert-sst2 if finbert unavailable.
-    """
 
     def __init__(
         self,
@@ -54,7 +30,6 @@ class SentimentAnalyzer:
         self._device = device
 
     def _load(self):
-        """Lazy-load the model (avoid loading at import time)."""
         if self._pipeline is not None:
             return
 
@@ -93,21 +68,15 @@ class SentimentAnalyzer:
             log.info(f"Loaded fallback model on {device}")
 
     def analyze(self, text: str) -> SentimentResult:
-        """Analyze sentiment of a single text."""
         self._load()
         result = self._pipeline(text)[0]
         return self._to_result(text, result)
 
     def analyze_batch(self, texts: list[str]) -> list[SentimentResult]:
-        """Analyze sentiment of multiple texts efficiently.
-
-        Processes in batches for GPU efficiency.
-        """
         self._load()
         if not texts:
             return []
 
-        # Filter empty/None texts
         valid = [(i, t) for i, t in enumerate(texts) if t and len(t.strip()) > 0]
         if not valid:
             return []
@@ -123,30 +92,24 @@ class SentimentAnalyzer:
         return [self._to_result(t, r) for t, r in zip(clean_texts, results)]
 
     def _to_result(self, text: str, raw: dict) -> SentimentResult:
-        """Convert pipeline output to SentimentResult."""
         label = raw["label"].lower()
         score = raw["score"]
 
-        # Map to -1 to +1 scale
         if label in ("positive", "pos"):
             sentiment = score
         elif label in ("negative", "neg"):
             sentiment = -score
-        else:  # neutral
+        else:
             sentiment = 0.0
 
         return SentimentResult(
-            text=text[:200],  # truncate for storage
+            text=text[:200],
             label=label,
             score=score,
             sentiment=sentiment,
         )
 
     def aggregate(self, results: list[SentimentResult]) -> dict:
-        """Aggregate sentiment results into features.
-
-        Returns dict of NLP features for a single market/event.
-        """
         if not results:
             return {
                 "nlp_sentiment_mean": 0.0,

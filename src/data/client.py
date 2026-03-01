@@ -1,11 +1,3 @@
-"""Base API client for Polymarket.
-
-Wrapper around py-clob-client and httpx for all three APIs:
-- CLOB API (trading, order book, prices)
-- Gamma API (market metadata)
-- Data API (positions, analytics)
-"""
-
 import json
 import os
 from typing import Any
@@ -23,16 +15,9 @@ CLOB_URL = "https://clob.polymarket.com"
 GAMMA_URL = "https://gamma-api.polymarket.com"
 DATA_URL = "https://data-api.polymarket.com"
 
-
 class PolymarketClient:
-    """Unified client for all Polymarket APIs."""
 
     def __init__(self, private_key: str | None = None):
-        """Initialize the client.
-
-        Args:
-            private_key: private key for trading (None = read-only)
-        """
         self.clob = ClobClient(CLOB_URL)
         self._http = httpx.Client(timeout=30)
         self._authenticated = False
@@ -42,7 +27,7 @@ class PolymarketClient:
                 CLOB_URL,
                 key=private_key,
                 chain_id=137,
-                signature_type=1,  # Email/Magic wallet
+                signature_type=1,
                 funder=os.getenv("POLYMARKET_FUNDER_ADDRESS", ""),
             )
             self.clob.set_api_creds(self.clob.create_or_derive_api_creds())
@@ -51,10 +36,7 @@ class PolymarketClient:
         else:
             log.info("Read-only client initialized")
 
-    # --- Health ---
-
     def health_check(self) -> bool:
-        """Check connectivity to all APIs."""
         checks = {}
         try:
             checks["clob"] = self.clob.get_ok() == "OK"
@@ -79,8 +61,6 @@ class PolymarketClient:
         log.info(f"Health check: {checks}")
         return all(checks.values())
 
-    # --- Gamma API (market metadata) ---
-
     def get_events(
         self,
         active: bool = True,
@@ -91,7 +71,6 @@ class PolymarketClient:
         ascending: bool = False,
         **kwargs: Any,
     ) -> list[dict]:
-        """Fetch list of events."""
         params = {
             "active": str(active).lower(),
             "closed": str(closed).lower(),
@@ -106,36 +85,29 @@ class PolymarketClient:
         return r.json()
 
     def get_event_by_slug(self, slug: str) -> dict | None:
-        """Fetch an event by its slug."""
         r = self._http.get(f"{GAMMA_URL}/events/slug/{slug}")
         if r.status_code == 200:
             return r.json()
         return None
 
     def search(self, query: str) -> dict:
-        """Search markets, events, and profiles."""
         r = self._http.get(
             f"{GAMMA_URL}/public-search", params={"query": query}
         )
         r.raise_for_status()
         return r.json()
 
-    # --- CLOB API (prices, order book) ---
-
     def get_order_book(self, token_id: str) -> dict:
-        """Get order book for a token (as plain dict)."""
         book = self.clob.get_order_book(token_id)
         return book.__dict__ if hasattr(book, "__dict__") else book
 
     def get_midpoint(self, token_id: str) -> float:
-        """Get midpoint price."""
         result = self.clob.get_midpoint(token_id)
         if isinstance(result, dict):
             return float(result.get("mid", 0))
         return float(result)
 
     def get_price(self, token_id: str, side: str = "BUY") -> float:
-        """Get best bid or ask price."""
         result = self.clob.get_price(token_id, side)
         if isinstance(result, dict):
             return float(result.get("price", 0))
@@ -148,14 +120,6 @@ class PolymarketClient:
         end_ts: int,
         fidelity: int = 60,
     ) -> list[dict]:
-        """Get historical prices.
-
-        Args:
-            token_id: token ID (used as market param)
-            start_ts: start unix timestamp
-            end_ts: end unix timestamp
-            fidelity: interval in minutes (1, 5, 60, 1440)
-        """
         r = self._http.get(
             f"{CLOB_URL}/prices-history",
             params={
@@ -169,15 +133,12 @@ class PolymarketClient:
         data = r.json()
         return data.get("history", [])
 
-    # --- Data API (trades, positions) ---
-
     def get_trades(
         self,
         market: str | None = None,
         limit: int = 100,
         **kwargs: Any,
     ) -> list[dict]:
-        """Fetch trades."""
         params: dict[str, str] = {"limit": str(limit)}
         if market:
             params["market"] = market
@@ -187,8 +148,6 @@ class PolymarketClient:
         r.raise_for_status()
         return r.json()
 
-    # --- Gamma API (comments) ---
-
     def get_comments(
         self,
         limit: int = 100,
@@ -197,7 +156,6 @@ class PolymarketClient:
         ascending: bool = False,
         **kwargs: Any,
     ) -> list[dict]:
-        """Fetch comments. Rate limit: 200 req/10s."""
         params = {
             "limit": str(limit),
             "offset": str(offset),
@@ -210,16 +168,12 @@ class PolymarketClient:
         return r.json()
 
     def get_event_comment_count(self, event_id: str) -> int:
-        """Get comment count for an event."""
         r = self._http.get(f"{GAMMA_URL}/events/{event_id}/comments/count")
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, int) else data.get("count", 0)
 
-    # --- Data API (holders) ---
-
     def get_market_holders(self, market: str, limit: int = 20) -> list[dict]:
-        """Get top holders for a market."""
         r = self._http.get(
             f"{DATA_URL}/holders",
             params={"market": market, "limit": str(limit)},
@@ -228,7 +182,6 @@ class PolymarketClient:
         return r.json()
 
     def close(self):
-        """Close HTTP connections."""
         self._http.close()
 
     def __enter__(self):

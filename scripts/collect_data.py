@@ -1,21 +1,3 @@
-"""Parallel data collection with incremental saves and graceful shutdown.
-
-Runs 3 parallel streams (different APIs, no rate limit conflict):
-  Stream A (Data API):  trades for all markets
-  Stream B (CLOB API):  price history (60min + 5min bars)
-  Stream C (CLOB API):  orderbook snapshots (sequential with B via lock)
-
-Each stream saves results incrementally to JSONL — safe to Ctrl+C at any time.
-On restart, already-collected items are skipped automatically.
-
-Usage:
-    python scripts/collect_data.py                    # all streams, top 50
-    python scripts/collect_data.py --limit 500        # top 500 markets
-    python scripts/collect_data.py --sample           # small demo dataset (10 markets, 7 days)
-    python scripts/collect_data.py --streams trades    # only trades
-    python scripts/collect_data.py --prices-fidelity 5 --prices-days 30
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -38,26 +20,17 @@ log = get_logger("collect_all")
 RAW_DIR = Path("data/raw")
 PROGRESS_DIR = Path("data/raw/.progress")
 
-
-# --- Shared shutdown flag ---
-
 shutdown_event = threading.Event()
-
 
 def _signal_handler(sig, frame):
     log.info("Shutdown signal received — finishing current items and saving...")
     shutdown_event.set()
 
-
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
-
-# --- Live progress counters (thread-safe) ---
-
 progress_lock = threading.Lock()
-progress = {}  # {stream_name: {done, total, skipped, items_collected, started_at, errors}}
-
+progress = {}
 
 def _init_progress(name: str, total: int, skipped: int = 0):
     with progress_lock:
@@ -70,7 +43,6 @@ def _init_progress(name: str, total: int, skipped: int = 0):
             "started_at": time.time(),
         }
 
-
 def _update_progress(name: str, items: int = 0, error: bool = False):
     with progress_lock:
         p = progress[name]
@@ -79,9 +51,7 @@ def _update_progress(name: str, items: int = 0, error: bool = False):
         if error:
             p["errors"] += 1
 
-
 def _get_progress_summary() -> str:
-    """Build a single-line progress summary for all streams."""
     with progress_lock:
         parts = []
         for name, p in sorted(progress.items()):
@@ -105,9 +75,7 @@ def _get_progress_summary() -> str:
             )
         return "\n".join(parts)
 
-
 def _save_progress_file():
-    """Write progress summary to a file for external monitoring."""
     summary = _get_progress_summary()
     path = PROGRESS_DIR / "STATUS.txt"
     elapsed = time.time() - min(
@@ -120,9 +88,7 @@ def _save_progress_file():
     )
     path.write_text(header + summary + "\n")
 
-
 def progress_reporter():
-    """Background thread: prints progress every 30s."""
     while not shutdown_event.is_set():
         shutdown_event.wait(30)
         if shutdown_event.is_set():
@@ -130,32 +96,23 @@ def progress_reporter():
         if progress:
             log.info(f"\n{'─' * 60}\n{_get_progress_summary()}\n{'─' * 60}")
             _save_progress_file()
-    # Final report
+
     if progress:
         _save_progress_file()
 
-
-# --- Progress tracking (skip already collected) ---
-
-
 def _load_progress(name: str) -> set[str]:
-    """Load set of completed item IDs from progress file."""
     PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     path = PROGRESS_DIR / f"{name}.done"
     if path.exists():
         return set(path.read_text().strip().split("\n"))
     return set()
 
-
 def _mark_done(name: str, item_id: str):
-    """Append completed item ID to progress file."""
     path = PROGRESS_DIR / f"{name}.done"
     with open(path, "a") as f:
         f.write(item_id + "\n")
 
-
 def _append_jsonl(path: Path, data: dict | list):
-    """Append one JSON record (or list of records) to JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
         if isinstance(data, list):
@@ -164,19 +121,13 @@ def _append_jsonl(path: Path, data: dict | list):
         else:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
-
-# --- Market loading ---
-
-
 def load_markets(limit: int) -> list[dict]:
     markets_file = "data/processed/top_markets_for_collection.json"
     with open(markets_file) as f:
         markets = json.load(f)
     return markets[:limit]
 
-
 def extract_tokens(markets: list[dict]) -> list[tuple[str, str, str]]:
-    """Extract (token_id, condition_id, question) triples."""
     result = []
     for m in markets:
         cid = m.get("conditionId", "")
@@ -191,12 +142,7 @@ def extract_tokens(markets: list[dict]) -> list[tuple[str, str, str]]:
                 result.append((tid, cid, question))
     return result
 
-
-# --- Stream A: Trades (Data API) ---
-
-
 def stream_trades(markets: list[dict], max_trades: int = 10000, delay: float = 0.12):
-    """Collect trades for each market, saving incrementally."""
     stream_name = "trades"
     done = _load_progress(stream_name)
     out_path = RAW_DIR / "trades" / f"trades_incremental_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
@@ -253,10 +199,6 @@ def stream_trades(markets: list[dict], max_trades: int = 10000, delay: float = 0
 
     log.info(f"[trades] DONE: {collected} trades from {total - skipped} markets -> {out_path}")
 
-
-# --- Stream B: Price History (CLOB API) ---
-
-
 def stream_prices(
     tokens: list[tuple[str, str, str]],
     fidelity: int = 60,
@@ -264,7 +206,6 @@ def stream_prices(
     delay: float = 0.12,
     clob_lock: threading.Lock | None = None,
 ):
-    """Collect price history for each token, saving incrementally."""
     stream_name = f"prices_f{fidelity}"
     done = _load_progress(stream_name)
     out_path = (
@@ -340,16 +281,11 @@ def stream_prices(
 
     log.info(f"[prices f{fidelity}] DONE: {collected} bars from {total - skipped} tokens -> {out_path}")
 
-
-# --- Stream C: Orderbook Snapshots (CLOB API) ---
-
-
 def stream_orderbooks(
     tokens: list[tuple[str, str, str]],
     delay: float = 0.1,
     clob_lock: threading.Lock | None = None,
 ):
-    """Collect current orderbook snapshot for each token."""
     stream_name = "orderbooks"
     done = _load_progress(stream_name)
     ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -417,10 +353,6 @@ def stream_orderbooks(
 
     log.info(f"[orderbooks] DONE: {collected} snapshots -> {out_path}")
 
-
-# --- Main ---
-
-
 def main():
     parser = argparse.ArgumentParser(description="Parallel Polymarket data collection")
     parser.add_argument("--limit", type=int, default=50, help="Number of top markets (default: 50)")
@@ -440,19 +372,16 @@ def main():
 
     streams = args.streams or ["trades", "prices", "orderbooks"]
 
-    # Optionally clear progress
     if args.reset:
         if PROGRESS_DIR.exists():
             for f in PROGRESS_DIR.glob("*.done"):
                 f.unlink()
             log.info("Progress files cleared")
 
-    # Load markets
     markets = load_markets(args.limit)
     tokens = extract_tokens(markets)
     log.info(f"Loaded {len(markets)} markets, {len(tokens)} tokens")
 
-    # Show what's already done
     for stream in streams:
         name = stream if stream != "prices5" else "prices_f5"
         if stream == "prices":
@@ -461,7 +390,6 @@ def main():
         if done:
             log.info(f"  [{name}] {len(done)} already collected, will skip")
 
-    # CLOB lock: prices and orderbooks both use CLOB API
     clob_lock = threading.Lock()
 
     threads = []
@@ -502,7 +430,6 @@ def main():
     log.info(f"Monitor progress: cat data/raw/.progress/STATUS.txt")
     start_time = time.time()
 
-    # Start progress reporter
     reporter = threading.Thread(target=progress_reporter, name="reporter", daemon=True)
     reporter.start()
 
@@ -512,14 +439,12 @@ def main():
     for t in threads:
         t.join()
 
-    # Stop reporter
     shutdown_event.set()
     reporter.join(timeout=2)
 
     elapsed = time.time() - start_time
     minutes = elapsed / 60
 
-    # Final progress report
     if progress:
         log.info(f"\n{'=' * 60}\nFINAL REPORT ({minutes:.1f} min)\n{'=' * 60}\n{_get_progress_summary()}\n{'=' * 60}")
         _save_progress_file()
@@ -530,7 +455,6 @@ def main():
         log.info(f"All streams completed in {minutes:.1f} min.")
 
     log.info("Run pipeline to rebuild processed data: python scripts/update_data.py --pipeline-only")
-
 
 if __name__ == "__main__":
     main()

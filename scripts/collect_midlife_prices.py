@@ -1,15 +1,3 @@
-"""Collect mid-life price snapshots for resolved markets.
-
-For each resolved market, fetches daily price history from CLOB API
-and extracts the price at the midpoint of the market's lifetime.
-This gives us an "honest" price feature — not the near-resolution
-lastTradePrice that leaks outcome information.
-
-Usage:
-    python scripts/collect_midlife_prices.py --min-volume 50000 --batch-size 500
-    python scripts/collect_midlife_prices.py --resume  # continue from checkpoint
-"""
-
 import argparse
 import json
 import time
@@ -29,9 +17,7 @@ DATA_DIR = PROJECT / "data"
 OUTPUT_FILE = DATA_DIR / "processed" / "midlife_prices.parquet"
 CHECKPOINT_FILE = DATA_DIR / "processed" / "midlife_prices_checkpoint.json"
 
-
 def load_resolved_markets(min_volume: float = 50_000, min_lifetime_h: float = 24) -> pd.DataFrame:
-    """Load resolved markets filtered by volume and lifetime."""
     df = pd.read_parquet(DATA_DIR / "processed" / "resolution_outcomes.parquet")
     df = df.dropna(subset=["createdAt", "closedTime", "token_id_yes"])
     df["lifetime_h"] = (df["closedTime"] - df["createdAt"]).dt.total_seconds() / 3600
@@ -41,31 +27,22 @@ def load_resolved_markets(min_volume: float = 50_000, min_lifetime_h: float = 24
     log.info(f"Filtered: {len(filtered)} markets (vol>=${min_volume:,.0f}, lifetime>={min_lifetime_h}h)")
     return filtered
 
-
 def get_midlife_price(
     client: PolymarketClient,
     token_id: str,
     created_ts: int,
     closed_ts: int,
 ) -> dict | None:
-    """Fetch price at mid-life of a market.
-
-    Strategy: get daily bars for full lifetime, pick the bar closest to midpoint.
-    Also extracts early-life (25%) and late-life (75%) prices for richer features.
-    """
     lifetime = closed_ts - created_ts
-    if lifetime < 3600:  # skip < 1h markets
+    if lifetime < 3600:
         return None
 
     mid_ts = created_ts + lifetime // 2
     q1_ts = created_ts + lifetime // 4
     q3_ts = created_ts + 3 * lifetime // 4
 
-    # Optimized: 3 narrow API calls around Q1, mid, Q3 (±6h windows)
-    # Plus 1 call for first 12h + 1 call for last 12h = 5 calls max
-    # But each call covers only a small window → fast, no pagination needed
-    fidelity = 60  # hourly bars
-    window = 6 * 3600  # ±6 hours
+    fidelity = 60
+    window = 6 * 3600
 
     all_history = []
     targets = [
@@ -89,7 +66,6 @@ def get_midlife_price(
     if not all_history:
         return None
 
-    # Deduplicate and sort
     seen = set()
     unique = []
     for h in all_history:
@@ -120,12 +96,10 @@ def get_midlife_price(
         "price_mean": float(np.mean(all_prices)),
     }
 
-    # Momentum features
     result["momentum_first_half"] = result["price_mid"] - result["price_q1"]
     result["momentum_second_half"] = result["price_q3"] - result["price_mid"]
 
     return result
-
 
 def collect_midlife_prices(
     markets: pd.DataFrame,
@@ -133,7 +107,6 @@ def collect_midlife_prices(
     delay: float = 0.12,
     already_done: set | None = None,
 ) -> pd.DataFrame:
-    """Collect mid-life prices for all markets with checkpointing."""
     client = PolymarketClient()
     already_done = already_done or set()
 
@@ -159,12 +132,10 @@ def collect_midlife_prices(
         else:
             errors += 1
 
-        # Progress
         if (i + 1) % 100 == 0:
             success = len(batch_results) + len(results)
             log.info(f"[{i+1}/{total}] Success: {success}, Errors: {errors}")
 
-        # Save checkpoint every batch_size
         if (i + 1) % batch_size == 0 and batch_results:
             results.extend(batch_results)
             _save_checkpoint(results, already_done | {r["conditionId"] for r in results})
@@ -172,7 +143,6 @@ def collect_midlife_prices(
 
         time.sleep(delay)
 
-    # Final save
     results.extend(batch_results)
     if results:
         df_results = pd.DataFrame(results)
@@ -183,9 +153,7 @@ def collect_midlife_prices(
         log.warning("No results collected")
         return pd.DataFrame()
 
-
 def _save_checkpoint(results: list[dict], done_ids: set):
-    """Save checkpoint for resume capability."""
     checkpoint = {
         "n_collected": len(results),
         "done_ids": list(done_ids),
@@ -194,14 +162,11 @@ def _save_checkpoint(results: list[dict], done_ids: set):
     with open(CHECKPOINT_FILE, "w") as f:
         json.dump(checkpoint, f)
 
-    # Also save partial results
     df = pd.DataFrame(results)
     df.to_parquet(OUTPUT_FILE, index=False)
     log.info(f"Checkpoint saved: {len(results)} records")
 
-
 def _save_results(df: pd.DataFrame, already_done: set):
-    """Save final results, merging with existing if any."""
     if OUTPUT_FILE.exists() and already_done:
         existing = pd.read_parquet(OUTPUT_FILE)
         df = pd.concat([existing, df], ignore_index=True)
@@ -210,9 +175,7 @@ def _save_results(df: pd.DataFrame, already_done: set):
     df.to_parquet(OUTPUT_FILE, index=False)
     log.info(f"Saved {len(df)} records to {OUTPUT_FILE}")
 
-
 def load_checkpoint() -> set:
-    """Load checkpoint if exists."""
     if CHECKPOINT_FILE.exists():
         with open(CHECKPOINT_FILE) as f:
             data = json.load(f)
@@ -220,7 +183,6 @@ def load_checkpoint() -> set:
         log.info(f"Resuming from checkpoint: {len(done_ids)} already done")
         return done_ids
     return set()
-
 
 def main():
     parser = argparse.ArgumentParser(description="Collect mid-life prices for resolved markets")
@@ -252,7 +214,6 @@ def main():
         delay=args.delay,
         already_done=already_done,
     )
-
 
 if __name__ == "__main__":
     main()

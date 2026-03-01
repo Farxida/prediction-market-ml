@@ -1,18 +1,3 @@
-"""
-NeuralForecast Experiment — Phase 5.5 final improvement.
-
-Compare neuralforecast models vs our LightGBM baseline on prediction market data.
-Uses Bernoulli loss for binary classification (UP/DOWN 12h direction).
-
-Models:
-1. NHITS + Bernoulli (hierarchical interpolation)
-2. NBEATSx + Bernoulli (interpretable + exogenous)
-3. DeepAR + StudentT (probabilistic → P(UP) from distribution)
-4. PatchTST + Bernoulli (transformer-based)
-5. BiTCN + Bernoulli (temporal convolutional)
-
-Comparison: neuralforecast models vs LightGBM (AUC=0.678) vs our PyTorch models (best ResCNN=0.675)
-"""
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
@@ -41,28 +26,22 @@ torch.manual_seed(SEED)
 PROJECT = Path(__file__).resolve().parent.parent
 DATA = PROJECT / 'data'
 
-WINDOW = 48      # 48h lookback
-HORIZON = 12     # 12h prediction horizon
+WINDOW = 48
+HORIZON = 12
 
 print("=" * 70)
 print("NEURALFORECAST EXPERIMENT — Phase 5.5")
 print("=" * 70)
 sys.stdout.flush()
 
-# ============================================================
-# 1. DATA: Prepare neuralforecast-compatible format
-# ============================================================
 print("\n=== 1. Loading and preparing data ===")
 t0 = time.time()
 
 prices = pd.read_parquet(DATA / 'processed/prices.parquet')
 print(f"Raw prices: {prices.shape}, Tokens: {prices['token_id'].nunique()}")
 
-# NeuralForecast needs: unique_id, ds, y + optional exogenous
-# We need enough data per token: at least WINDOW + HORIZON + buffer
 MIN_LEN = WINDOW + HORIZON + 20
 
-# Build per-token dataframes with features
 dfs = []
 token_count = 0
 skipped = 0
@@ -74,7 +53,6 @@ for token, group in grouped:
         skipped += 1
         continue
 
-    # Create features
     ret = np.zeros_like(p); ret[1:] = np.diff(p)
     vol = pd.Series(ret).rolling(12, min_periods=1).std().values
     ma12 = pd.Series(p).rolling(12, min_periods=1).mean().values
@@ -89,13 +67,11 @@ for token, group in grouped:
         'momentum': momentum,
     })
 
-    # Drop rows with NaN
     df_token = df_token.dropna()
     if len(df_token) >= MIN_LEN:
         dfs.append(df_token)
         token_count += 1
 
-    # Limit tokens for speed (neuralforecast is slower than our numpy pipeline)
     if token_count >= 200:
         break
 
@@ -106,12 +82,8 @@ print(f"Prepared: {n_total:,} rows, {n_tokens} tokens (skipped {skipped})")
 print(f"Time: {time.time()-t0:.1f}s")
 sys.stdout.flush()
 
-# ============================================================
-# 2. TIME SPLIT
-# ============================================================
 print("\n=== 2. Time-based split ===")
 
-# Get unique timestamps
 all_dates = sorted(df_all['ds'].unique())
 n_dates = len(all_dates)
 train_date = all_dates[int(n_dates * 0.70)]
@@ -125,20 +97,14 @@ print(f"Train: {len(df_train):,} rows, until {train_date}")
 print(f"Val:   {len(df_val):,} rows")
 print(f"Test:  {len(df_test):,} rows, from {val_date}")
 
-# For neuralforecast: train = train+val, predict on test
 df_trainval = pd.concat([df_train, df_val], ignore_index=True)
 print(f"TrainVal: {len(df_trainval):,} rows")
 sys.stdout.flush()
 
-# ============================================================
-# 3. BASELINE: LightGBM (same features as other experiments)
-# ============================================================
 print("\n=== 3. LightGBM baseline ===")
 t1 = time.time()
 
-# Create windowed features for LGB
 def make_lgb_data(df_all, window=WINDOW, horizon=HORIZON):
-    """Create (X, y) from time series for LGB comparison."""
     all_X, all_y = [], []
 
     for token in df_all['unique_id'].unique():
@@ -163,7 +129,6 @@ def make_lgb_data(df_all, window=WINDOW, horizon=HORIZON):
         future_p = p[np.arange(n_seq) + window + horizon - 1]
         labels = (future_p > current_p).astype(np.float32)
 
-        # Summary features
         feats = []
         for f_idx in range(4):
             col = X_w[:, :, f_idx]
@@ -215,20 +180,8 @@ print(f"LightGBM: AUC={lgb_auc:.4f}, WR={lgb_wr:.1%} ({time.time()-t1:.1f}s)")
 print(f"  Test samples: {len(y_lgb[val_end:]):,}, UP={y_lgb[val_end:].mean():.1%}")
 sys.stdout.flush()
 
-# ============================================================
-# 4. NEURALFORECAST MODELS
-# ============================================================
 print("\n=== 4. NeuralForecast models ===")
 sys.stdout.flush()
-
-# For classification: predict binary direction as y=0/1,
-# use Bernoulli loss
-# But neuralforecast expects continuous y for most models.
-# Strategy: forecast price, then compare forecast vs current → P(UP)
-
-# Approach A: Direct forecasting (predict price h steps ahead)
-# Then: direction = sign(forecast - current_price)
-# This is the natural neuralforecast use case
 
 hist_exog = ['return', 'volatility', 'momentum']
 
@@ -251,7 +204,7 @@ models_config = [
         scaler_type='standard',
         random_seed=SEED,
         accelerator='cpu',
-        # PatchTST does NOT support hist_exog
+
     )),
     ('BiTCN', BiTCN(
         h=HORIZON,
@@ -273,7 +226,6 @@ results = {
     }
 }
 
-# Train and evaluate each model
 for model_name, model in models_config:
     print(f"\n--- {model_name} ---")
     t_model = time.time()
@@ -282,39 +234,23 @@ for model_name, model in models_config:
     try:
         nf = NeuralForecast(models=[model], freq='h')
 
-        # Fit on train+val
         nf.fit(df=df_trainval, val_size=int(len(df_val) / n_tokens))
 
-        # Cross-validation approach: predict on test
-        # neuralforecast.predict() forecasts h steps from last point
-        # For proper evaluation, we need rolling forecasts
-
-        # Use cross_validation for proper evaluation
         forecasts = nf.cross_validation(
             df=df_all,
             n_windows=1,
             step_size=HORIZON,
         )
 
-        # Get the column name for this model
         model_col = [c for c in forecasts.columns if model_name in c and 'lo' not in c and 'hi' not in c]
         if not model_col:
             model_col = [c for c in forecasts.columns if c not in ['unique_id', 'ds', 'cutoff', 'y']]
 
         if model_col:
             col = model_col[0]
-            # Direction: forecast > current (y column = actual price)
-            # We need: was forecast direction correct?
-            # forecast > current_price → predict UP
-            # actual future > current_price → actual UP
 
             forecast_vals = forecasts[col].values
             actual_vals = forecasts['y'].values
-
-            # Get current prices (price at forecast time = y lagged by h)
-            # In cross_validation output, 'y' is the actual future value
-            # We need the price at the time of forecast
-            # Group by unique_id, for each forecast get the price h steps before
 
             correct_predictions = 0
             total_predictions = 0
@@ -330,7 +266,6 @@ for model_name, model in models_config:
                     actual_future = row['y']
                     forecast_price = row[col]
 
-                    # Find current price (HORIZON steps before forecast_ds)
                     current_ds = forecast_ds - pd.Timedelta(hours=HORIZON)
                     current_row = uid_data[uid_data['ds'] == current_ds]
 
@@ -339,11 +274,10 @@ for model_name, model in models_config:
 
                     current_price = current_row['y'].values[0]
 
-                    # Direction
                     pred_up = float(forecast_price > current_price)
                     actual_up = float(actual_future > current_price)
 
-                    all_pred_probs.append(forecast_price - current_price)  # signed delta
+                    all_pred_probs.append(forecast_price - current_price)
                     all_actual_dirs.append(actual_up)
                     total_predictions += 1
 
@@ -351,7 +285,6 @@ for model_name, model in models_config:
                 pred_arr = np.array(all_pred_probs)
                 actual_arr = np.array(all_actual_dirs)
 
-                # AUC: use signed delta as score
                 try:
                     auc = roc_auc_score(actual_arr, pred_arr)
                 except:
@@ -382,20 +315,14 @@ for model_name, model in models_config:
 
     sys.stdout.flush()
 
-# ============================================================
-# 5. APPROACH B: Bernoulli loss (direct classification)
-# ============================================================
 print("\n=== 5. Bernoulli loss models (direct classification) ===")
 sys.stdout.flush()
 
-# For Bernoulli: y must be 0/1 (direction labels)
-# Create direction-labeled dataset
 dfs_binary = []
 for token in df_all['unique_id'].unique():
     df_t = df_all[df_all['unique_id'] == token].sort_values('ds').copy()
     p = df_t['y'].values
 
-    # Label: will price go UP in next HORIZON hours?
     future_p = np.full(len(p), np.nan)
     future_p[:len(p)-HORIZON] = p[HORIZON:]
     direction = (future_p > p).astype(float)
@@ -410,7 +337,6 @@ for token in df_all['unique_id'].unique():
 df_binary = pd.concat(dfs_binary, ignore_index=True)
 print(f"Binary dataset: {len(df_binary):,} rows, UP={df_binary['y'].mean():.1%}")
 
-# Split
 all_dates_b = sorted(df_binary['ds'].unique())
 train_date_b = all_dates_b[int(len(all_dates_b) * 0.70)]
 val_date_b = all_dates_b[int(len(all_dates_b) * 0.85)]
@@ -442,7 +368,6 @@ for model_name, model in bernoulli_models:
 
         forecasts = nf.cross_validation(df=df_binary, n_windows=1, step_size=HORIZON)
 
-        # Bernoulli outputs probability directly
         model_col = [c for c in forecasts.columns if 'NHITS' in c and 'lo' not in c and 'hi' not in c]
         if not model_col:
             model_col = [c for c in forecasts.columns if c not in ['unique_id', 'ds', 'cutoff', 'y']]
@@ -452,7 +377,6 @@ for model_name, model in bernoulli_models:
             pred = forecasts[col].values
             actual = forecasts['y'].values
 
-            # Remove NaN
             valid = ~(np.isnan(pred) | np.isnan(actual))
             pred = pred[valid]
             actual = actual[valid]
@@ -481,9 +405,6 @@ for model_name, model in bernoulli_models:
 
     sys.stdout.flush()
 
-# ============================================================
-# 6. SUMMARY
-# ============================================================
 print("\n" + "=" * 70)
 print("SUMMARY")
 print("=" * 70)
@@ -502,7 +423,6 @@ for name, res in sorted(results.items(), key=lambda x: x[1].get('auc', 0), rever
         marker = ' ← BEST' if name == 'lgb_baseline' else ''
         print(f"{name:<25} | {auc:>6.4f} | {wr:>5.1%} | {n:>8,} | {t:>5.0f}s{marker}")
 
-# Key comparison
 lgb_auc_val = results['lgb_baseline']['auc']
 best_nf = max([(k, v.get('auc', 0)) for k, v in results.items() if k != 'lgb_baseline'], key=lambda x: x[1])
 print(f"\nLightGBM AUC: {lgb_auc_val:.4f}")
@@ -516,13 +436,11 @@ elif best_nf[1] > lgb_auc_val - 0.005:
 else:
     print("\n→ LightGBM STILL BETTER — confirms gradient boosting dominance on tabular data")
 
-# Phase 4 reference
 print(f"\nReference: Phase 4 LGB AUC=0.678 (full 78 features, 35K samples)")
 print(f"Reference: ResCNN AUC=0.675 (4 features, 270K samples)")
 
 sys.stdout.flush()
 
-# Save
 results['config'] = {
     'window': WINDOW, 'horizon': HORIZON, 'seed': SEED,
     'n_tokens': n_tokens, 'n_total': n_total,

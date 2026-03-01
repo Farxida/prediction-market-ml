@@ -1,13 +1,3 @@
-"""Signal generation engine for Polymarket trading.
-
-Combines multiple model signals (TB short-term + HTR hold-to-resolution)
-into unified trading decisions with confidence scores.
-
-Usage:
-    engine = SignalEngine(tb_model_path="lgb_v3.joblib", htr_model_path="lgb_htr_v1.joblib")
-    signals = engine.generate(market_data)
-"""
-
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,31 +13,20 @@ log = get_logger(__name__)
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 
-
 @dataclass
 class Signal:
-    """Trading signal from model."""
     token_id: str
     condition_id: str
     side: Literal["YES", "NO"]
-    p_model: float       # Model's probability of YES
-    p_market: float      # Current market price
-    edge: float          # p_model - p_market (signed)
-    ev: float            # Expected value of trade
-    source: str          # "tb" or "htr" or "ensemble"
-    confidence: float    # 0-1 confidence score
+    p_model: float
+    p_market: float
+    edge: float
+    ev: float
+    source: str
+    confidence: float
     market_question: str = ""
 
-
 class SignalEngine:
-    """Generate trading signals from market data.
-
-    Supports two model types:
-    - TB (Triple Barrier): short-term TP/SL predictions on active markets
-    - HTR (Hold-to-Resolution): resolution outcome predictions
-
-    When both are available, uses weighted ensemble.
-    """
 
     def __init__(
         self,
@@ -66,7 +45,6 @@ class SignalEngine:
         self.tb_weight = tb_weight
         self.htr_weight = htr_weight
 
-        # Load TB model
         self.tb_model = None
         self.tb_calibrator = None
         self.tb_features = None
@@ -84,7 +62,6 @@ class SignalEngine:
             except Exception as e:
                 log.warning(f"TB model not loaded: {e}")
 
-        # Load HTR model
         self.htr_model = None
         self.htr_calibrator = None
         self.htr_features = None
@@ -98,7 +75,7 @@ class SignalEngine:
                         htr_meta = json.load(f)
                     self.htr_features = htr_meta.get("features")
                     self.htr_medians = np.array(htr_meta["train_medians"])
-                # Load Platt calibrator if exists
+
                 cal_path = MODELS_DIR / htr_model_path.replace(".joblib", "_platt.joblib")
                 if cal_path.exists():
                     self.htr_calibrator = joblib.load(cal_path)
@@ -107,11 +84,9 @@ class SignalEngine:
                 log.warning(f"HTR model not loaded: {e}")
 
     def _fee(self, price: float) -> float:
-        """Compute maker fee."""
         return polymarket_fee(price, self.fee_rate)
 
     def _compute_ev(self, p_model: float, p_market: float, side: str) -> float:
-        """Compute expected value for a trade."""
         if side == "YES":
             fee = self._fee(p_market)
             win_net = (1.0 - p_market) - fee
@@ -126,17 +101,9 @@ class SignalEngine:
         return ev
 
     def generate_tb_signal(self, market_data: dict) -> Signal | None:
-        """Generate signal from TB (Triple Barrier) model.
-
-        Note: TB model uses mostly median features for live trading (74/78),
-        so it predicts ~0.50 for all markets. Price filter prevents false
-        edge on extreme-priced markets.
-        """
         if self.tb_model is None:
             return None
 
-        # Skip non-mid-range prices where TB's ~0.50 prediction creates false edge.
-        # TB uses 74/78 median features → always predicts ~0.50 → only safe near 0.50.
         p_market = float(market_data.get("midpoint", 0.5))
         if p_market < 0.25 or p_market > 0.75:
             return None
@@ -155,7 +122,6 @@ class SignalEngine:
             p_market = float(market_data.get("midpoint", 0.5))
             edge = cal_prob - p_market
 
-            # Determine side
             if edge > self.edge_threshold:
                 side = "YES"
             elif edge < -self.edge_threshold:
@@ -184,11 +150,9 @@ class SignalEngine:
             return None
 
     def generate_htr_signal(self, market_data: dict) -> Signal | None:
-        """Generate signal from HTR (Hold-to-Resolution) model."""
         if self.htr_model is None:
             return None
 
-        # Skip ultra-extreme prices (illiquid penny markets)
         p_market = float(market_data.get("midpoint", 0.5))
         if p_market < 0.02 or p_market > 0.98:
             return None
@@ -235,11 +199,6 @@ class SignalEngine:
             return None
 
     def generate(self, market_data: dict) -> Signal | None:
-        """Generate best signal from all available models.
-
-        If both TB and HTR produce signals in the same direction,
-        returns an ensemble signal with higher confidence.
-        """
         tb_signal = self.generate_tb_signal(market_data)
         htr_signal = self.generate_htr_signal(market_data)
 
@@ -252,9 +211,8 @@ class SignalEngine:
         if htr_signal is None:
             return tb_signal
 
-        # Both signals available — check agreement
         if tb_signal.side == htr_signal.side:
-            # Agreeing signals → ensemble with boosted confidence
+
             p_ensemble = (
                 self.tb_weight * tb_signal.p_model
                 + self.htr_weight * htr_signal.p_model
@@ -285,11 +243,10 @@ class SignalEngine:
                 market_question=tb_signal.market_question,
             )
         else:
-            # Conflicting signals → pick higher EV
+
             return max(tb_signal, htr_signal, key=lambda s: s.ev)
 
     def _extract_tb_features(self, market_data: dict) -> np.ndarray | None:
-        """Extract TB feature vector from market data."""
         if self.tb_features is None or self.tb_medians is None:
             return None
 
@@ -316,18 +273,6 @@ class SignalEngine:
         return features
 
     def _extract_htr_features(self, market_data: dict) -> np.ndarray | None:
-        """Extract HTR v1 feature vector from market data.
-
-        HTR v1 features: price_mid, price_q1, price_q3, price_std,
-        price_range, mid_extremity, q1_to_q3_trend, log_volume,
-        log_lifetime, vol_per_hour, neg_risk, spread,
-        momentum_first_half, momentum_second_half.
-
-        For live trading, we approximate mid-life features from current data:
-        - price_mid/q1/q3 ≈ current midpoint (no history yet)
-        - price_std/range ≈ 0 (unknown)
-        - Other features from market_data or medians.
-        """
         if self.htr_features is None or self.htr_medians is None:
             return None
 
@@ -337,7 +282,6 @@ class SignalEngine:
 
         features = self.htr_medians.copy()
 
-        # Map live data to HTR features
         live_map = {
             "price_mid": price,
             "price_q1": price,

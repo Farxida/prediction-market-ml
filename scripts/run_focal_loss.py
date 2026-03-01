@@ -1,7 +1,3 @@
-"""
-Focal Loss Experiment — standalone script.
-Same experiment as notebooks/07_improvements/02_focal_loss.ipynb but with real-time output.
-"""
 import numpy as np
 import pandas as pd
 import torch
@@ -15,7 +11,6 @@ import json
 import time
 import sys
 
-# --- Config ---
 SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -41,9 +36,6 @@ print(f"Device: {DEVICE}")
 print(f"PyTorch: {torch.__version__}")
 sys.stdout.flush()
 
-# ============================================================
-# 1. DATA LOADING — stride_tricks for speed
-# ============================================================
 print("\n=== 1. Loading data ===")
 sys.stdout.flush()
 
@@ -58,7 +50,6 @@ t0 = time.time()
 sequences_X, sequences_y = [], []
 n_skipped = 0
 
-# Group once (much faster than repeated filtering)
 grouped = prices.groupby('token_id')['price']
 n_tokens = len(grouped)
 print(f"Processing {n_tokens} tokens...")
@@ -70,12 +61,11 @@ for idx, (token, price_series) in enumerate(grouped):
         n_skipped += 1
         continue
 
-    # Vectorized features
     ret = np.empty_like(p); ret[0] = 0; ret[1:] = np.diff(p)
     vol = pd.Series(ret).rolling(12, min_periods=1).std().values.astype(np.float32)
     ma12 = pd.Series(p).rolling(12, min_periods=1).mean().values.astype(np.float32)
     momentum = p - ma12
-    features = np.column_stack([p, ret, vol, momentum])  # (T, 4)
+    features = np.column_stack([p, ret, vol, momentum])
 
     T = len(features)
     n_seq = T - WINDOW - HORIZON
@@ -83,21 +73,18 @@ for idx, (token, price_series) in enumerate(grouped):
         n_skipped += 1
         continue
 
-    # Stride tricks — zero-copy sliding window!
     strides = features.strides
     X_windows = np.lib.stride_tricks.as_strided(
         features,
         shape=(n_seq, WINDOW, N_FEATURES),
         strides=(strides[0], strides[0], strides[1])
-    ).copy()  # copy to own memory
+    ).copy()
 
-    # Labels
     idx_starts = np.arange(n_seq)
     current_p = p[idx_starts + WINDOW - 1]
     future_p = p[idx_starts + WINDOW + HORIZON - 1]
     labels = (future_p > current_p).astype(np.float32)
 
-    # Filter NaN
     valid = ~np.isnan(X_windows.reshape(n_seq, -1)).any(axis=1)
     if valid.sum() > 0:
         sequences_X.append(X_windows[valid])
@@ -121,9 +108,6 @@ print(f"Tokens: {n_tokens - n_skipped}/{n_tokens} used")
 print(f"Class balance: UP={y.mean():.1%}, DOWN={1-y.mean():.1%}")
 sys.stdout.flush()
 
-# ============================================================
-# 2. SPLIT + NORMALIZE
-# ============================================================
 print("\n=== 2. Split + Normalize ===")
 n = len(X)
 train_end = int(n * 0.70)
@@ -141,13 +125,9 @@ train_std = X_train.reshape(-1, N_FEATURES).std(axis=0) + 1e-8
 X_train_norm = (X_train - train_mean) / train_std
 X_val_norm = (X_val - train_mean) / train_std
 X_test_norm = (X_test - train_mean) / train_std
-del X  # free memory
+del X
 print("Normalized ✓")
 sys.stdout.flush()
-
-# ============================================================
-# 3. MODELS + LOSS FUNCTIONS
-# ============================================================
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=0.75):
@@ -163,7 +143,6 @@ class FocalLoss(nn.Module):
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
         return (alpha_t * focal_weight * bce).mean()
 
-
 class ResBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -172,7 +151,6 @@ class ResBlock(nn.Module):
             nn.Conv1d(channels, channels, 3, padding=1), nn.BatchNorm1d(channels))
     def forward(self, x):
         return F.relu(self.block(x) + x)
-
 
 class ResCNN(nn.Module):
     def __init__(self, in_channels=4, dropout=0.3):
@@ -188,7 +166,6 @@ class ResCNN(nn.Module):
         x = self.pool1(self.res1(x)); x = self.pool2(self.res2(x)); x = self.res3(x)
         return self.classifier(self.gap(x).squeeze(-1)).squeeze(-1)
 
-
 class PriceGRU(nn.Module):
     def __init__(self, input_size=4, hidden_size=64, dropout=0.3):
         super().__init__()
@@ -198,7 +175,6 @@ class PriceGRU(nn.Module):
         _, h_n = self.gru(x)
         return self.classifier(h_n[-1]).squeeze(-1)
 
-
 class TimeSeriesDataset(Dataset):
     def __init__(self, X, y, channels_first=False):
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -207,10 +183,6 @@ class TimeSeriesDataset(Dataset):
         self.y = torch.tensor(y, dtype=torch.float32)
     def __len__(self): return len(self.X)
     def __getitem__(self, idx): return self.X[idx], self.y[idx]
-
-# ============================================================
-# 4. TRAINING
-# ============================================================
 
 @torch.no_grad()
 def evaluate(model, loader):
@@ -225,7 +197,6 @@ def evaluate(model, loader):
     labels = np.concatenate(all_labels)
     auc = roc_auc_score(labels, preds)
     return auc, preds, labels
-
 
 def train_one(model, train_loader, val_loader, test_loader, criterion, name):
     model = model.to(DEVICE)
@@ -266,11 +237,9 @@ def train_one(model, train_loader, val_loader, test_loader, criterion, name):
     model.load_state_dict(best_state)
     test_auc, preds, labels = evaluate(model, test_loader)
 
-    # Metrics @ 0.5
     pred_05 = (preds > 0.5).astype(int)
     report = classification_report(labels, pred_05, target_names=['DOWN', 'UP'], output_dict=True)
 
-    # Optimal threshold
     prec, rec, thrs = precision_recall_curve(labels, preds)
     f1s = 2 * prec * rec / (prec + rec + 1e-8)
     best_idx = np.argmax(f1s)
@@ -293,10 +262,6 @@ def train_one(model, train_loader, val_loader, test_loader, criterion, name):
         'train_time': elapsed,
     }
 
-
-# ============================================================
-# 5. RUN EXPERIMENTS
-# ============================================================
 print("\n=== 3. Running DL experiments ===")
 sys.stdout.flush()
 
@@ -336,9 +301,6 @@ for arch_name, ModelClass, ch_first in arch_configs:
         result = train_one(model, train_loader, val_loader, test_loader, criterion, f"{arch_name}_{loss_name}")
         results.append(result)
 
-# ============================================================
-# 6. LightGBM experiments
-# ============================================================
 print("\n=== 4. LightGBM experiments ===")
 sys.stdout.flush()
 
@@ -387,9 +349,6 @@ for name, extra in [('LGB_baseline', {}), ('LGB_is_unbalance', {'is_unbalance': 
           f"thr={bt:.3f}→Recall={rep_opt['UP']['recall']:.3f}")
     sys.stdout.flush()
 
-# ============================================================
-# 7. SAVE RESULTS
-# ============================================================
 print("\n=== 5. Saving results ===")
 
 save_data = {
@@ -400,7 +359,6 @@ save_data = {
 with open(DATA / 'features/focal_loss_results.json', 'w') as f:
     json.dump(save_data, f, indent=2, default=str)
 
-# Grand table
 print("\n" + "=" * 90)
 print(f"{'Model':<25} {'AUC':>6} {'RecUP@0.5':>10} {'F1UP@0.5':>9} {'BestThr':>8} {'RecUP@opt':>10} {'F1UP@opt':>9}")
 print("-" * 90)

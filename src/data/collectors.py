@@ -1,9 +1,3 @@
-"""Data collectors for Polymarket.
-
-Historical data collection from Gamma, CLOB, and Data APIs.
-Saves raw data to data/raw/ with timestamps.
-"""
-
 import json
 import time
 from datetime import datetime, timezone
@@ -16,13 +10,10 @@ log = get_logger(__name__)
 
 RAW_DIR = Path("data/raw")
 
-
 def _timestamp_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-
 def _save_json(data: list | dict, name: str, subdir: str = "") -> Path:
-    """Save data as JSON to data/raw/[subdir/]name_TIMESTAMP.json."""
     target = RAW_DIR / subdir if subdir else RAW_DIR
     target.mkdir(parents=True, exist_ok=True)
     path = target / f"{name}_{_timestamp_str()}.json"
@@ -31,10 +22,6 @@ def _save_json(data: list | dict, name: str, subdir: str = "") -> Path:
     log.info(f"Saved {path} ({len(data) if isinstance(data, list) else 1} records)")
     return path
 
-
-# --- Markets Collector (Gamma API) ---
-
-
 def collect_all_events(
     client: PolymarketClient,
     active: bool = True,
@@ -42,18 +29,6 @@ def collect_all_events(
     batch_size: int = 100,
     delay: float = 0.1,
 ) -> list[dict]:
-    """Collect all events from Gamma API with pagination.
-
-    Args:
-        client: PolymarketClient instance
-        active: include active events
-        closed: include closed/resolved events
-        batch_size: events per request (max 100)
-        delay: seconds between requests (rate limiting)
-
-    Returns:
-        List of all event dicts with nested markets.
-    """
     all_events = []
     offset = 0
 
@@ -79,21 +54,12 @@ def collect_all_events(
 
     return all_events
 
-
 def collect_markets(
     client: PolymarketClient,
     include_active: bool = True,
     include_resolved: bool = True,
     save: bool = True,
 ) -> dict[str, list[dict]]:
-    """Collect all markets from Polymarket via Gamma API events endpoint.
-
-    Fetches events (which contain nested markets) for both active
-    and resolved markets. Flattens markets with parent event metadata.
-
-    Returns:
-        {"events": [...], "markets": [...]}
-    """
     all_events = []
 
     if include_active:
@@ -108,7 +74,6 @@ def collect_markets(
         all_events.extend(resolved)
         log.info(f"Resolved events: {len(resolved)}")
 
-    # Flatten: extract markets from events with parent metadata
     markets = []
     for event in all_events:
         event_id = event.get("id", "")
@@ -135,10 +100,6 @@ def collect_markets(
 
     return result
 
-
-# --- Price History Collector (CLOB API) ---
-
-
 def collect_price_history(
     client: PolymarketClient,
     token_id: str,
@@ -148,19 +109,6 @@ def collect_price_history(
     max_window: int = 7 * 24 * 3600,
     delay: float = 0.1,
 ) -> list[dict]:
-    """Collect price history with automatic pagination for long periods.
-
-    CLOB prices-history has max ~7 day window at fidelity=5.
-    This function paginates through the full range.
-
-    Args:
-        token_id: token ID (NOT condition_id)
-        start_ts: start unix timestamp
-        end_ts: end unix timestamp
-        fidelity: interval in minutes (1, 5, 60, 360, 1440)
-        max_window: max seconds per request (default 7 days)
-        delay: seconds between requests
-    """
     all_history = []
     current_start = start_ts
 
@@ -184,7 +132,6 @@ def collect_price_history(
 
     return all_history
 
-
 def collect_prices_for_markets(
     client: PolymarketClient,
     markets: list[dict],
@@ -194,18 +141,6 @@ def collect_prices_for_markets(
     save: bool = True,
     delay: float = 0.15,
 ) -> dict[str, list[dict]]:
-    """Collect price history for multiple markets.
-
-    Args:
-        markets: list of market dicts (need clobTokenIds field)
-        start_ts, end_ts: time range
-        fidelity: interval in minutes
-        save: save to disk
-        delay: delay between markets
-
-    Returns:
-        {token_id: [{"t": timestamp, "p": price}, ...]}
-    """
     all_prices = {}
     total = len(markets)
 
@@ -237,26 +172,12 @@ def collect_prices_for_markets(
 
     return all_prices
 
-
-# --- Trades Collector (Data API) ---
-
-
 def collect_trades(
     client: PolymarketClient,
     condition_id: str,
     max_trades: int = 10000,
     delay: float = 0.1,
 ) -> list[dict]:
-    """Collect all trades for a market via Data API.
-
-    Data API /trades uses condition_id (NOT token_id).
-    Paginates using cursor/offset.
-
-    Args:
-        condition_id: market condition ID
-        max_trades: safety limit
-        delay: seconds between pages
-    """
     all_trades = []
     batch_size = 100
 
@@ -283,7 +204,6 @@ def collect_trades(
 
     return all_trades
 
-
 def collect_trades_for_markets(
     client: PolymarketClient,
     markets: list[dict],
@@ -291,17 +211,6 @@ def collect_trades_for_markets(
     max_trades_per_market: int = 10000,
     delay: float = 0.15,
 ) -> dict[str, list[dict]]:
-    """Collect trades for multiple markets.
-
-    Args:
-        markets: list of market dicts (need conditionId)
-        save: save to disk
-        max_trades_per_market: safety limit per market
-        delay: between markets
-
-    Returns:
-        {condition_id: [trade_dicts]}
-    """
     all_trades = {}
     total = len(markets)
 
@@ -326,26 +235,12 @@ def collect_trades_for_markets(
 
     return all_trades
 
-
-# --- Order Book Snapshots (CLOB API) ---
-
-
 def collect_order_book_snapshots(
     client: PolymarketClient,
     markets: list[dict],
     save: bool = True,
     delay: float = 0.1,
 ) -> dict[str, dict]:
-    """Collect current order book snapshots for markets.
-
-    Args:
-        markets: list of market dicts (need clobTokenIds)
-        save: save to disk
-        delay: between requests
-
-    Returns:
-        {token_id: order_book_dict}
-    """
     snapshots = {}
     total = len(markets)
 
@@ -361,7 +256,7 @@ def collect_order_book_snapshots(
                 continue
             try:
                 book = client.get_order_book(token_id)
-                # Convert to serializable dict
+
                 if hasattr(book, "__dict__"):
                     book = book.__dict__
                 snapshots[token_id] = book

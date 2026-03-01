@@ -1,11 +1,3 @@
-"""Collect price history and trades for top markets.
-
-Usage:
-    python scripts/collect_top500.py all --limit 50
-    python scripts/collect_top500.py prices --limit 50
-    python scripts/collect_top500.py trades --limit 50
-"""
-
 import json
 import sys
 import time
@@ -19,7 +11,6 @@ from src.utils.logger import get_logger
 log = get_logger("collect_top500")
 
 MARKETS_FILE = "data/processed/top_markets_for_collection.json"
-
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -55,7 +46,6 @@ def main():
         client.close()
 
     log.info("Collection complete")
-
 
 if __name__ == "__main__":
     main()

@@ -1,12 +1,3 @@
-"""Paper trading engine for Polymarket.
-
-Simulates order execution on live market data without real money.
-Supports maker (limit) and taker (market) order types.
-
-Usage:
-    python -m src.execution.paper_trader --config configs/paper_trading.json
-"""
-
 import json
 import signal as signal_mod
 import sys
@@ -34,14 +25,11 @@ PROJECT = Path(__file__).resolve().parents[2]
 DEFAULT_LOGS_DIR = PROJECT / "logs" / "paper_trading"
 MODELS_DIR = PROJECT / "data" / "models"
 
-# These are now set dynamically per instance (see __init__)
 LOGS_DIR = DEFAULT_LOGS_DIR
 CHECKPOINT_PATH = DEFAULT_LOGS_DIR / "checkpoint.json"
 
-
 @dataclass
 class Position:
-    """Open paper position."""
     token_id: str
     condition_id: str
     side: Literal["YES", "NO"]
@@ -53,12 +41,10 @@ class Position:
     category: str = ""
     source: str = ""
     market_question: str = ""
-    peak_price: float = 0.0  # Best price seen (for trailing exit)
-
+    peak_price: float = 0.0
 
 @dataclass
 class Trade:
-    """Completed paper trade."""
     token_id: str
     condition_id: str
     side: Literal["YES", "NO"]
@@ -75,13 +61,11 @@ class Trade:
     category: str = ""
     market_question: str = ""
 
-
 @dataclass
 class PaperPortfolio:
-    """Paper trading portfolio state."""
     initial_capital: float = 1000.0
     cash: float = 1000.0
-    positions: dict = field(default_factory=dict)  # token_id → Position
+    positions: dict = field(default_factory=dict)
     trades: list = field(default_factory=list)
     equity_curve: list = field(default_factory=list)
 
@@ -98,10 +82,6 @@ class PaperPortfolio:
         return self.cash + self.total_invested
 
     def mark_to_market_equity(self, live_prices: dict[str, float]) -> float:
-        """Equity using live prices instead of entry prices.
-
-        live_prices contains YES midpoints. For NO positions, convert to NO price.
-        """
         mtm_value = 0.0
         for tid, pos in self.positions.items():
             yes_mid = live_prices.get(tid)
@@ -134,13 +114,7 @@ class PaperPortfolio:
             "win_rate": self.win_rate,
         }
 
-
 class PaperTrader:
-    """Paper trading engine.
-
-    Polls live market data, generates signals from model,
-    simulates maker order execution, tracks positions.
-    """
 
     def __init__(
         self,
@@ -150,37 +124,37 @@ class PaperTrader:
         htr_model_path: str | None = "lgb_true_htr_v1.joblib",
         htr_meta_path: str | None = "htr_v1_meta.json",
         initial_capital: float = 1000.0,
-        fee_rate: float = 0.0175,  # maker fee
+        fee_rate: float = 0.0175,
         edge_threshold: float = 0.01,
         max_position_pct: float = 0.10,
         max_positions: int = 10,
         cash_reserve_pct: float = 0.20,
-        poll_interval: int = 300,  # 5 min
-        # A/B testing params
+        poll_interval: int = 300,
+
         log_dir: str | None = None,
         instance_name: str | None = None,
         price_min: float = 0.10,
         price_max: float = 0.90,
-        categories: list[str] | None = None,  # whitelist (None=all)
-        exclude_categories: list[str] | None = None,  # blacklist
+        categories: list[str] | None = None,
+        exclude_categories: list[str] | None = None,
         kelly_fraction: float = 0.5,
         time_exit_hours: float = 12.0,
         min_liquidity: float = 50_000,
-        max_liquidity: float | None = None,  # cap for small-markets mode
-        small_markets: bool = False,  # sort ascending (least popular first)
-        # Model variant flags
+        max_liquidity: float | None = None,
+        small_markets: bool = False,
+
         inverse_mode: bool = False,
         rule_based_only: bool = False,
         use_meta: bool = False,
         meta_threshold: float = 0.5,
-        # v2 improvements (2026-03-11)
-        adverse_move_threshold: float = 0.10,  # was 0.15 — faster exit on adverse moves
-        trailing_keep_pct: float = 0.50,  # keep 50% of peak profit (trailing exit)
-        min_entry_price: float = 0.05,  # skip penny bets below this (resolution loss risk)
-        edge_gone_cooldown_hours: float = 1.0,  # don't exit "edge gone" in first hour (noise)
-        max_hold_by_category: dict | None = None,  # category → max hold hours
+
+        adverse_move_threshold: float = 0.10,
+        trailing_keep_pct: float = 0.50,
+        min_entry_price: float = 0.05,
+        edge_gone_cooldown_hours: float = 1.0,
+        max_hold_by_category: dict | None = None,
     ):
-        # Instance-specific log directory
+
         global LOGS_DIR, CHECKPOINT_PATH
         if log_dir:
             LOGS_DIR = Path(log_dir)
@@ -192,7 +166,6 @@ class PaperTrader:
 
         self._instance_name = instance_name or "default"
 
-        # Model variant flags
         self._inverse_mode = inverse_mode
         self._rule_based_only = rule_based_only
         self._use_meta = use_meta
@@ -209,12 +182,10 @@ class PaperTrader:
                 log.warning(f"Meta model not found at {meta_path}, disabling meta filter")
                 self._use_meta = False
 
-        # Market filters
         self._price_range = (price_min, price_max)
         self._category_whitelist = set(c.lower() for c in categories) if categories else None
         self._category_blacklist = set(c.lower() for c in exclude_categories) if exclude_categories else None
 
-        # Signal engine: ML models (TB + HTR ensemble)
         self.signal_engine = SignalEngine(
             tb_model_path=model_path,
             tb_calibrator_path=calibrator_path,
@@ -225,10 +196,8 @@ class PaperTrader:
             edge_threshold=edge_threshold,
         )
 
-        # Strategy router: rule-based strategies (MR, contrarian, NLP, etc.)
         self.strategy_router = StrategyRouter()
 
-        # Config
         self.fee_rate = fee_rate
         self.edge_threshold = edge_threshold
         self.max_position_pct = max_position_pct
@@ -236,13 +205,11 @@ class PaperTrader:
         self.cash_reserve_pct = cash_reserve_pct
         self.poll_interval = poll_interval
 
-        # Portfolio
         self.portfolio = PaperPortfolio(
             initial_capital=initial_capital,
             cash=initial_capital,
         )
 
-        # Risk manager
         self.risk = RiskManager(RiskConfig(
             max_position_pct=max_position_pct,
             max_positions=max_positions,
@@ -254,12 +221,10 @@ class PaperTrader:
         self.risk.reset_daily(initial_capital)
         self.risk.update_equity(initial_capital)
 
-        # API client (read-only)
         self.client = PolymarketClient()
 
-        # Gamma API metadata cache (token_id → {question, category, volume, liquidity})
         self._market_meta: dict = {}
-        # Keyword-based category classification (Gamma API has no category field)
+
         self._category_keywords = {
             "sports": ["nba", "nfl", "nhl", "mlb", "premier league", "champions league",
                        "serie a", "la liga", "bundesliga", "ligue 1", "uefa", "fifa",
@@ -286,36 +251,31 @@ class PaperTrader:
                             "nato", "ceasefire", "invasion", "military"],
         }
 
-        # v2 improvements
         self._adverse_move_threshold = adverse_move_threshold
         self._trailing_keep_pct = trailing_keep_pct
         self._min_entry_price = min_entry_price
         self._edge_gone_cooldown_hours = edge_gone_cooldown_hours
         self._max_hold_by_category = max_hold_by_category or {
-            "sports": 6.0,      # sports resolve fast, don't hold long
-            "crypto": 6.0,      # volatile, quick exits
-            "commodity": 6.0,   # volatile
+            "sports": 6.0,
+            "crypto": 6.0,
+            "commodity": 6.0,
             "geopolitics": 12.0,
             "economics": 12.0,
-            "politics": 24.0,   # slow resolution
+            "politics": 24.0,
         }
 
-        # Cooldown: don't re-open within 30 min of closing
-        self._close_cooldown: dict[str, datetime] = {}  # token_id → close_time
+        self._close_cooldown: dict[str, datetime] = {}
         self._cooldown_minutes = 30
 
-        # Checkpoint every N iterations (default: every 3 = ~15min at 5min poll)
         self._checkpoint_interval = 3
         self._iteration_since_checkpoint = 0
 
-        # Dynamic market refresh: scan for new markets when capital is idle
-        self._refresh_interval = 15  # iterations (~15min at 60s poll)
+        self._refresh_interval = 15
         self._iterations_since_refresh = 0
         self._min_liquidity = min_liquidity
-        self._max_liquidity = max_liquidity  # None = no cap (default); set for small markets mode
-        self._small_markets = small_markets  # ascending order by volume = less popular first
+        self._max_liquidity = max_liquidity
+        self._small_markets = small_markets
 
-        # Logging
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self.log_file = LOGS_DIR / f"paper_trades_{ts}.jsonl"
@@ -327,7 +287,6 @@ class PaperTrader:
                  f"exclude={exclude_categories or 'none'}, logs={LOGS_DIR}")
 
     def _log_event(self, event_type: str, data: dict):
-        """Append event to JSONL log."""
         record = {
             "time": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
@@ -337,21 +296,10 @@ class PaperTrader:
             f.write(json.dumps(record, default=str) + "\n")
 
     def _compute_signal(self, market_data: dict) -> dict | None:
-        """Generate best signal from ML models + rule-based strategies.
-
-        Priority:
-        1. SignalEngine (TB + HTR ML models) — highest confidence
-        2. StrategyRouter (rule-based: MR, contrarian, NLP, MM, etc.)
-
-        Modes:
-        - inverse_mode: flip ML signal direction (sanity check)
-        - rule_based_only: skip ML, use only rule-based strategies
-        - use_meta: filter ML signals through meta-labeling model
-        """
         signal = None
 
         if not self._rule_based_only:
-            # Try ML model signal first
+
             ml_signal = self.signal_engine.generate(market_data)
             if ml_signal is not None:
                 signal = {
@@ -363,12 +311,12 @@ class PaperTrader:
                 }
 
         if signal is None:
-            # Fall back to rule-based strategies via metamodel router
+
             route = self.strategy_router.route(market_data)
             if not route.skip:
                 signals = self.strategy_router.generate_signals(market_data)
                 if signals:
-                    best = signals[0]  # sorted by edge
+                    best = signals[0]
                     p_market = float(market_data.get("midpoint", 0.5))
                     entry_fee = fee(p_market, self.fee_rate)
                     ev = best.edge - entry_fee
@@ -384,37 +332,32 @@ class PaperTrader:
         if signal is None:
             return None
 
-        # Inverse mode: flip direction (sanity check — should lose money)
         if self._inverse_mode and signal["source"] in ("htr", "tb"):
             signal["side"] = "NO" if signal["side"] == "YES" else "YES"
             signal["p_model"] = 1.0 - signal["p_model"]
             signal["source"] = f"inv_{signal['source']}"
 
-        # Meta-labeling filter: only trade when meta model predicts P(correct) > threshold
         if self._use_meta and self._meta_model is not None and signal["source"] in ("htr", "tb"):
             p = signal["p_model"]
-            conf = abs(p - 0.5) * 2  # 0 to 1
+            conf = abs(p - 0.5) * 2
             direction = 1.0 if signal["side"] == "YES" else 0.0
             meta_input = np.array([[p, conf, direction]])
             meta_prob = self._meta_model.predict(meta_input)[0]
             if meta_prob < self._meta_threshold:
-                return None  # meta says model is likely wrong here
+                return None
             signal["source"] = f"meta_{signal['source']}"
 
         return signal
 
     def _can_open_position(self, token_id: str, market_data: dict = None) -> bool:
-        """Check if we can open a new position."""
         if token_id in self.portfolio.positions:
             return False
 
-        # Cooldown after closing — prevent immediate re-open (fee churn)
         if token_id in self._close_cooldown:
             elapsed = (datetime.now(timezone.utc) - self._close_cooldown[token_id]).total_seconds() / 60
             if elapsed < self._cooldown_minutes:
                 return False
 
-        # Category filter (A/B testing)
         market_data = market_data or {}
         cat = (market_data.get("category") or "").lower().strip()
         if self._category_whitelist and cat not in self._category_whitelist:
@@ -437,11 +380,9 @@ class PaperTrader:
 
     def open_position(self, token_id: str, condition_id: str,
                       signal: dict, market_data: dict):
-        """Open a paper position."""
         if not self._can_open_position(token_id, market_data):
             return
 
-        # Use risk manager for Kelly sizing
         bet_size = self.risk.compute_size(
             equity=self.portfolio.equity,
             cash=self.portfolio.cash,
@@ -453,14 +394,12 @@ class PaperTrader:
             return
 
         p_market = signal["p_market"]
-        # For NO side, we buy NO tokens at (1 - p_yes)
+
         if signal["side"] == "NO":
             entry_price = 1.0 - p_market
         else:
             entry_price = p_market
 
-        # v2: Skip penny bets — resolution loss on low prices is catastrophic
-        # Data shows 0-10¢ zone = -$75 PnL, 25% WR, mostly resolution losses
         if entry_price < self._min_entry_price:
             log.debug(f"Skipped penny bet: entry {entry_price:.3f} < {self._min_entry_price}")
             return
@@ -509,25 +448,18 @@ class PaperTrader:
                  f"(EV={signal['ev']:.4f}, {source}) — {market_data.get('question', '')[:50]}")
 
     def close_position(self, token_id: str, yes_midpoint: float, reason: str):
-        """Close a paper position.
-
-        Args:
-            yes_midpoint: current YES token midpoint price
-        """
         if token_id not in self.portfolio.positions:
             return
 
         pos = self.portfolio.positions.pop(token_id)
 
-        # Convert to the token price we actually hold
         if pos.side == "NO":
             exit_price = 1.0 - yes_midpoint
         else:
             exit_price = yes_midpoint
 
         exit_fee_total = fee(exit_price, self.fee_rate) * pos.n_shares
-        # PnL: both sides now use same formula (exit - entry) since entry_price
-        # is already in the correct token's terms
+
         pnl = (exit_price - pos.entry_price) * pos.n_shares - pos.entry_fee - exit_fee_total
 
         trade = Trade(
@@ -580,10 +512,6 @@ class PaperTrader:
                  f"PnL=${pnl:+.2f} ({reason})")
 
     def check_exits(self, markets: list[dict]):
-        """Check if any open positions should be closed.
-
-        Uses risk manager rules + signal re-evaluation (close if edge gone).
-        """
         live_prices = {m["token_id"]: m["midpoint"] for m in markets
                        if "midpoint" in m and "token_id" in m}
 
@@ -592,20 +520,17 @@ class PaperTrader:
             if current_price is None:
                 continue
 
-            # Determine regime from source
             source = pos.source
             if source in ("mean_reversion", "contrarian", "event_driven_nlp"):
                 regime = Regime.MEAN_REVERTING
             elif source == "momentum":
                 regime = Regime.MOMENTUM
             else:
-                # TB/HTR models: treat as MR (77% of markets are mean-reverting)
+
                 regime = Regime.MEAN_REVERTING
 
-            # Convert to our token's price
             token_price = (1.0 - current_price) if pos.side == "NO" else current_price
 
-            # Resolution exit: market essentially resolved (token price near 1.0 or 0.0)
             if token_price >= 0.995:
                 self.close_position(token_id, current_price,
                     f"Resolution win: token price {token_price:.3f}")
@@ -615,35 +540,28 @@ class PaperTrader:
                     f"Resolution loss: token price {token_price:.3f}")
                 continue
 
-            # Update peak price for trailing exit (in our token's terms)
             pos.peak_price = max(pos.peak_price, token_price)
 
-            # --- v2: Adverse move protection (TIGHTER: 10% default, was 15%) ---
-            # Catches live events (UFC, sports) where outcome flips mid-game
             adverse_move = pos.entry_price - token_price
             if adverse_move > self._adverse_move_threshold:
                 self.close_position(token_id, current_price,
                     f"Adverse move exit: {adverse_move:+.3f} from entry {pos.entry_price:.3f}")
                 continue
 
-            # --- v2: Trailing profit exit with tighter logic ---
             peak_profit = pos.peak_price - pos.entry_price
             current_profit = token_price - pos.entry_price
 
-            # Original: keep 50% of peak. If peak profit was large, exit sooner.
-            # Also exit if profit turned negative after being positive
             if peak_profit > 0.02:
                 if current_profit < peak_profit * self._trailing_keep_pct:
                     self.close_position(token_id, current_price,
                         f"Trailing exit: profit dropped from {peak_profit:+.3f} to {current_profit:+.3f}")
                     continue
-                # v2: if we had 5%+ profit and it went negative → emergency exit
+
                 if peak_profit > 0.05 and current_profit < 0:
                     self.close_position(token_id, current_price,
                         f"Trailing emergency: was {peak_profit:+.3f}, now {current_profit:+.3f}")
                     continue
 
-            # --- v2: Category-aware time exit ---
             entry_time = datetime.fromisoformat(pos.entry_time)
             hold_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             cat = pos.category.lower() if pos.category else ""
@@ -653,7 +571,6 @@ class PaperTrader:
                     f"Category time exit: held {hold_hours:.0f}h >= {cat_max_hold:.0f}h ({cat or 'default'})")
                 continue
 
-            # --- v2: Edge gone with cooldown (don't exit in first hour — too noisy) ---
             p_model_current = 0.0
             market_data = next((m for m in markets if m.get("token_id") == token_id), None)
             if market_data:
@@ -676,14 +593,13 @@ class PaperTrader:
                 side=pos.side,
             )
             if should_exit:
-                # v2: Suppress "edge gone" exits in first hour (too noisy, -$164 loss)
+
                 if "Edge gone" in reason and hold_hours < self._edge_gone_cooldown_hours:
                     log.debug(f"Edge gone suppressed (hold {hold_hours:.1f}h < {self._edge_gone_cooldown_hours}h)")
                     continue
                 self.close_position(token_id, current_price, reason)
 
     def save_equity(self, live_prices: dict[str, float] | None = None):
-        """Save equity snapshot with mark-to-market."""
         snap = self.portfolio.snapshot()
         snap["mtm_equity"] = (
             self.portfolio.mark_to_market_equity(live_prices)
@@ -697,7 +613,6 @@ class PaperTrader:
             f.write(",".join(str(v) for v in snap.values()) + "\n")
 
     def status(self, live_prices: dict[str, float] | None = None) -> str:
-        """Return current portfolio status string."""
         p = self.portfolio
         risk_status = self.risk.status()
         halted = " [HALTED]" if risk_status["halted"] else ""
@@ -710,28 +625,20 @@ class PaperTrader:
         )
 
     def run_once(self, markets: list[dict]):
-        """Single iteration: scan markets, generate signals, manage positions.
 
-        Args:
-            markets: list of market dicts with token_id, midpoint, etc.
-        """
-        # 0. Daily reset (handles midnight crossing)
         self.risk.reset_daily(self.portfolio.equity)
 
-        # 1. Check exits on current positions (with signal re-evaluation)
         self.check_exits(markets)
 
         live_prices = {m["token_id"]: m["midpoint"] for m in markets
                        if "midpoint" in m and "token_id" in m}
 
-        # 2. Check risk limits
         ok, reason = self.risk.check_limits(self.portfolio.equity, self.portfolio.n_positions)
         if not ok:
             log.warning(f"Trading halted: {reason}")
             self.save_equity(live_prices)
             return
 
-        # 3. Scan for new signals
         for market in markets:
             token_id = market.get("token_id")
             if not token_id:
@@ -746,11 +653,9 @@ class PaperTrader:
                     market_data=market,
                 )
 
-        # 4. Save equity snapshot
         self.save_equity(live_prices)
 
     def _classify_category(self, question: str, event_title: str = "") -> str:
-        """Classify market category from question/event text using keywords."""
         text = f"{question} {event_title}".lower()
         for cat, keywords in self._category_keywords.items():
             if any(kw in text for kw in keywords):
@@ -758,7 +663,6 @@ class PaperTrader:
         return "other"
 
     def _enrich_from_gamma(self, token_ids: list[str]):
-        """Fetch market metadata from Gamma API (once, cached)."""
         import httpx
         uncached = set(t for t in token_ids if t not in self._market_meta)
         if not uncached:
@@ -766,7 +670,7 @@ class PaperTrader:
 
         try:
             import json as _json
-            # Fetch multiple pages to find our tokens
+
             found = set()
             for offset in range(0, 500, 100):
                 if not (uncached - found):
@@ -805,7 +709,6 @@ class PaperTrader:
             log.warning(f"Gamma enrichment failed: {e}")
 
     def _matches_category_filter(self, category: str) -> bool:
-        """Check if a market category passes whitelist/blacklist filters."""
         cat = category.lower().strip()
         if self._category_whitelist and cat not in self._category_whitelist:
             return False
@@ -815,11 +718,6 @@ class PaperTrader:
 
     def _scan_gamma_markets(self, existing: set[str], max_tokens: int = 30,
                             pages: int = 5) -> list[str]:
-        """Scan Gamma API for markets matching this instance's filters.
-
-        Applies price range, category, and liquidity filters.
-        Returns list of new token IDs (not in existing set).
-        """
         import httpx
         import json as _json
 
@@ -861,7 +759,6 @@ class PaperTrader:
                 if self._max_liquidity is not None and liq > self._max_liquidity:
                     continue
 
-                # Category filter
                 question = m.get("question", "")
                 event_title = ""
                 events = m.get("events", [])
@@ -872,7 +769,6 @@ class PaperTrader:
                 if not self._matches_category_filter(category):
                     continue
 
-                # Price filter via CLOB midpoint
                 try:
                     r = httpx.get(
                         "https://clob.polymarket.com/midpoint",
@@ -901,10 +797,6 @@ class PaperTrader:
         return new_tokens
 
     def discover_markets(self, target: int = 20) -> list[str]:
-        """Auto-discover markets matching this instance's filters.
-
-        Called at startup when --auto-discover is used (no --tokens).
-        """
         liq_range = f"${self._min_liquidity:,.0f}"
         if self._max_liquidity is not None:
             liq_range += f"–${self._max_liquidity:,.0f}"
@@ -922,15 +814,6 @@ class PaperTrader:
         return tokens
 
     def _refresh_markets(self, token_ids: list[str]) -> list[str]:
-        """Scan for new tradeable markets when capital is idle.
-
-        Triggers when:
-        - Cash > 30% of equity (room for new positions)
-        - Fewer than max_positions open
-        - At least _refresh_interval iterations since last refresh
-
-        Returns updated token_ids list (pruned dead + new).
-        """
         cash_pct = self.portfolio.cash / self.portfolio.equity if self.portfolio.equity > 0 else 1.0
         if cash_pct < 0.30:
             return token_ids
@@ -938,7 +821,7 @@ class PaperTrader:
             return token_ids
 
         try:
-            # Prune dead tokens (p=0 or API error) — don't count them in cap
+
             import httpx
             alive_tokens = []
             dead_count = 0
@@ -954,7 +837,7 @@ class PaperTrader:
                     else:
                         dead_count += 1
                 except Exception:
-                    alive_tokens.append(tid)  # keep on API error
+                    alive_tokens.append(tid)
 
             if dead_count > 0:
                 log.info(f"Market refresh: pruned {dead_count} dead tokens "
@@ -981,14 +864,7 @@ class PaperTrader:
 
     def run(self, token_ids: list[str], duration_minutes: int = 60,
             resume: bool = True):
-        """Run paper trading loop.
 
-        Args:
-            token_ids: list of token IDs to monitor
-            duration_minutes: how long to run
-            resume: if True, load checkpoint from previous run if available
-        """
-        # Try to resume from checkpoint
         resumed = False
         if resume:
             resumed = self._load_checkpoint()
@@ -997,10 +873,8 @@ class PaperTrader:
                  f"{duration_minutes}min, poll every {self.poll_interval}s"
                  f"{' (resumed)' if resumed else ''}")
 
-        # One-time Gamma API enrichment
         self._enrich_from_gamma(token_ids)
 
-        # Handle SIGTERM gracefully (save checkpoint + report on kill)
         self._stop_requested = False
         def _handle_sigterm(signum, frame):
             log.info("Received SIGTERM — saving checkpoint and stopping...")
@@ -1014,7 +888,7 @@ class PaperTrader:
         stop_file = LOGS_DIR / "STOP"
 
         while time.time() < end_time and not self._stop_requested:
-            # Check for STOP file (per-instance graceful shutdown)
+
             if stop_file.exists():
                 log.info(f"STOP file detected ({stop_file}) — stopping...")
                 stop_file.unlink(missing_ok=True)
@@ -1022,7 +896,7 @@ class PaperTrader:
 
             iteration += 1
             try:
-                # Detect sleep gaps (system suspended)
+
                 gap = time.time() - last_iteration_time
                 if gap > self.poll_interval * 2:
                     gap_min = gap / 60
@@ -1030,13 +904,11 @@ class PaperTrader:
                                 f"(expected {self.poll_interval/60:.0f}min)")
                 last_iteration_time = time.time()
 
-                # Dynamic market refresh when capital is idle
                 self._iterations_since_refresh += 1
                 if self._iterations_since_refresh >= self._refresh_interval:
                     token_ids = self._refresh_markets(token_ids)
                     self._iterations_since_refresh = 0
 
-                # Fetch live data
                 markets = []
                 for tid in token_ids:
                     try:
@@ -1063,20 +935,17 @@ class PaperTrader:
                     except Exception as e:
                         log.debug(f"Skip token {tid[:20]}: {e}")
 
-                # Run iteration
                 self.run_once(markets)
 
                 live_prices = {m["token_id"]: m["midpoint"] for m in markets
                                if "midpoint" in m}
                 log.info(f"[{iteration}] {self.status(live_prices)}")
 
-                # Periodic checkpoint
                 self._iteration_since_checkpoint += 1
                 if self._iteration_since_checkpoint >= self._checkpoint_interval:
                     self._save_checkpoint()
                     self._iteration_since_checkpoint = 0
 
-                # Sleep
                 remaining = end_time - time.time()
                 sleep_time = min(self.poll_interval, remaining)
                 if sleep_time > 0:
@@ -1087,10 +956,9 @@ class PaperTrader:
                 break
             except Exception as e:
                 log.error(f"Iteration error: {e}")
-                self._save_checkpoint()  # Save on error too
+                self._save_checkpoint()
                 time.sleep(10)
 
-        # Final: save report, checkpoint for potential resume, close
         log.info(f"Paper trading complete. {self.status()}")
         self.save_equity()
         self._save_final_report()
@@ -1098,7 +966,6 @@ class PaperTrader:
         self.client.close()
 
     def _save_checkpoint(self):
-        """Save portfolio state to disk for crash recovery."""
         state = {
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "cash": self.portfolio.cash,
@@ -1113,7 +980,7 @@ class PaperTrader:
             "log_file": str(self.log_file),
             "equity_file": str(self.equity_file),
         }
-        # Write to temp file then rename (atomic on same filesystem)
+
         tmp = CHECKPOINT_PATH.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(state, f, default=str)
@@ -1121,7 +988,6 @@ class PaperTrader:
         log.debug("Checkpoint saved")
 
     def _load_checkpoint(self) -> bool:
-        """Load portfolio state from checkpoint. Returns True if loaded."""
         if not CHECKPOINT_PATH.exists():
             return False
 
@@ -1132,21 +998,17 @@ class PaperTrader:
             self.portfolio.cash = state["cash"]
             self.portfolio.initial_capital = state["initial_capital"]
 
-            # Restore positions
             self.portfolio.positions = {}
             for tid, pdata in state.get("positions", {}).items():
                 self.portfolio.positions[tid] = Position(**pdata)
 
-            # Restore trades
             self.portfolio.trades = [Trade(**tdata) for tdata in state.get("trades", [])]
 
-            # Restore cooldowns
             self._close_cooldown = {
                 tid: datetime.fromisoformat(ts)
                 for tid, ts in state.get("cooldowns", {}).items()
             }
 
-            # Reuse log/equity files from previous run (append mode)
             prev_log = state.get("log_file")
             prev_equity = state.get("equity_file")
             if prev_log and Path(prev_log).exists():
@@ -1154,7 +1016,6 @@ class PaperTrader:
             if prev_equity and Path(prev_equity).exists():
                 self.equity_file = Path(prev_equity)
 
-            # Re-sync risk manager
             self.risk.reset_daily(self.portfolio.equity)
             self.risk.update_equity(self.portfolio.equity)
             for tid, pos in self.portfolio.positions.items():
@@ -1175,12 +1036,10 @@ class PaperTrader:
             return False
 
     def _clear_checkpoint(self):
-        """Remove checkpoint file after clean shutdown."""
         if CHECKPOINT_PATH.exists():
             CHECKPOINT_PATH.unlink()
 
     def _save_final_report(self):
-        """Save final report JSON."""
         report = {
             "portfolio": self.portfolio.snapshot(),
             "trades": [asdict(t) for t in self.portfolio.trades],
@@ -1205,9 +1064,7 @@ class PaperTrader:
             json.dump(report, f, indent=2, default=str)
         log.info(f"Report saved: {report_path}")
 
-
 def main():
-    """CLI entry point for paper trading."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Polymarket paper trader")
@@ -1229,7 +1086,7 @@ def main():
                         help="Resume from checkpoint if available (default)")
     parser.add_argument("--no-resume", dest="resume", action="store_false",
                         help="Start fresh, ignore checkpoint")
-    # A/B testing params
+
     parser.add_argument("--instance", type=str, default=None,
                         help="Instance name (separate log dir per instance)")
     parser.add_argument("--log-dir", type=str, default=None,
@@ -1252,7 +1109,7 @@ def main():
                         help="Max market liquidity $ — cap for small-markets mode (default: none)")
     parser.add_argument("--small-markets", action="store_true",
                         help="Target less popular markets (ascending volume order)")
-    # Model variant flags
+
     parser.add_argument("--inverse", action="store_true",
                         help="Inverse mode: flip ML signal direction (sanity check)")
     parser.add_argument("--rule-based-only", action="store_true",
@@ -1261,7 +1118,7 @@ def main():
                         help="Filter ML signals through meta-labeling model")
     parser.add_argument("--meta-threshold", type=float, default=0.5,
                         help="Meta model threshold (default: 0.5)")
-    # v2 improvements
+
     parser.add_argument("--adverse-threshold", type=float, default=0.10,
                         help="Adverse move exit threshold (default: 0.10, was 0.15)")
     parser.add_argument("--min-entry-price", type=float, default=0.05,
@@ -1270,7 +1127,6 @@ def main():
                         help="Hours before edge-gone exit activates (default: 1.0)")
     args = parser.parse_args()
 
-    # Load config from file if provided
     config = {}
     if args.config:
         with open(args.config) as f:
@@ -1279,7 +1135,7 @@ def main():
     token_ids = args.tokens or config.get("token_ids", [])
 
     trader = PaperTrader(
-        model_path=config.get("model_path", None),  # TB disabled: blind (74/78 median features)
+        model_path=config.get("model_path", None),
         calibrator_path=config.get("calibrator_path", "calibrators_v3.joblib"),
         meta_path=config.get("meta_path", "htr_meta_v1.json"),
         htr_model_path=config.get("htr_model_path", "lgb_true_htr_v1.joblib"),
@@ -1291,7 +1147,7 @@ def main():
         max_positions=config.get("max_positions", 15),
         cash_reserve_pct=config.get("cash_reserve_pct", 0.20),
         poll_interval=args.poll,
-        # A/B testing
+
         log_dir=args.log_dir or config.get("log_dir"),
         instance_name=args.instance or config.get("instance_name"),
         price_min=config.get("price_min", args.price_min),
@@ -1303,21 +1159,20 @@ def main():
         min_liquidity=config.get("min_liquidity", args.min_liquidity),
         max_liquidity=config.get("max_liquidity", args.max_liquidity),
         small_markets=config.get("small_markets", args.small_markets),
-        # Model variants
+
         inverse_mode=args.inverse,
         rule_based_only=args.rule_based_only,
         use_meta=args.use_meta,
         meta_threshold=args.meta_threshold,
-        # v2 improvements
+
         adverse_move_threshold=config.get("adverse_move_threshold", args.adverse_threshold),
         min_entry_price=config.get("min_entry_price", args.min_entry_price),
         edge_gone_cooldown_hours=config.get("edge_gone_cooldown", args.edge_gone_cooldown),
     )
 
-    # Load tokens from another instance
     if args.tokens_from and not token_ids:
         source = args.tokens_from
-        # "main" / "default" → base logs dir; others → subdirectory
+
         candidates = []
         if source in ("main", "default"):
             candidates = [
@@ -1338,7 +1193,6 @@ def main():
         if not loaded:
             log.warning(f"Token file not found for '{source}', falling back to auto-discover")
 
-    # Auto-discover markets if no tokens provided
     if args.auto_discover or not token_ids:
         discovered = trader.discover_markets(target=args.max_markets)
         if not discovered and not token_ids:
@@ -1346,7 +1200,6 @@ def main():
             sys.exit(1)
         token_ids = list(set(token_ids + discovered))
 
-    # Save token list for other instances to read
     tokens_file = LOGS_DIR / "tokens.json"
     with open(tokens_file, "w") as f:
         json.dump(token_ids, f)
@@ -1354,7 +1207,6 @@ def main():
 
     trader.run(token_ids=token_ids, duration_minutes=args.duration,
                resume=args.resume)
-
 
 if __name__ == "__main__":
     main()

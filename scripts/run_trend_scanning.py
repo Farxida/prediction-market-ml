@@ -1,12 +1,3 @@
-"""
-Trend-Scanning Experiment — standalone script.
-López de Prado Ch5, Snippet 5.1-5.2: adaptive horizon via t-value of linear trend.
-
-3 experiments:
-1. Trend features: add backward-looking t_val, best_L to LGB → improve AUC?
-2. Adaptive labels: trend-scanning forward labels vs fixed 12h → better signal?
-3. Trend filter: skip low |t_val| → improve win rate?
-"""
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -18,48 +9,34 @@ import json
 import time
 import sys
 
-# --- Config ---
 SEED = 42
 np.random.seed(SEED)
 
 PROJECT = Path(__file__).resolve().parent.parent
 DATA = PROJECT / 'data'
 
-WINDOW = 48       # lookback window (hours)
-HORIZON = 12      # default fixed horizon
-HORIZONS_SCAN = [3, 6, 12, 18, 24, 36, 48]  # horizons to scan (López de Prado)
-BACK_HORIZONS = [6, 12, 24, 48]  # backward-looking horizons for features
+WINDOW = 48
+HORIZON = 12
+HORIZONS_SCAN = [3, 6, 12, 18, 24, 36, 48]
+BACK_HORIZONS = [6, 12, 24, 48]
 
 print("=" * 70)
 print("TREND-SCANNING EXPERIMENT (López de Prado Ch5)")
 print("=" * 70)
 sys.stdout.flush()
 
-# ============================================================
-# 1. VECTORIZED TREND-SCANNING FUNCTIONS
-# ============================================================
-
 def vectorized_tval(prices_2d, L):
-    """
-    Vectorized t-value of linear regression slope for windows of length L.
-    prices_2d: (n_windows, L) — each row is a window of L prices.
-    Returns: t-values array of shape (n_windows,)
-
-    Model: y_t = β₀ + β₁·t + ε,  t = 0,...,L-1
-    t-stat = β₁ / SE(β₁)
-    """
     n = prices_2d.shape[0]
     x = np.arange(L, dtype=np.float64)
     x_mean = x.mean()
-    SXX = ((x - x_mean) ** 2).sum()  # constant for given L
+    SXX = ((x - x_mean) ** 2).sum()
 
-    y_mean = prices_2d.mean(axis=1, keepdims=True)  # (n, 1)
-    x_centered = (x - x_mean)[np.newaxis, :]  # (1, L)
+    y_mean = prices_2d.mean(axis=1, keepdims=True)
+    x_centered = (x - x_mean)[np.newaxis, :]
 
-    SXY = (x_centered * (prices_2d - y_mean)).sum(axis=1)  # (n,)
+    SXY = (x_centered * (prices_2d - y_mean)).sum(axis=1)
     beta1 = SXY / SXX
 
-    # Residuals
     y_hat = y_mean + beta1[:, np.newaxis] * x_centered
     SSR = ((prices_2d - y_hat) ** 2).sum(axis=1)
 
@@ -72,14 +49,7 @@ def vectorized_tval(prices_2d, L):
     t_val = beta1 / SE_beta1
     return t_val
 
-
 def trend_scan_forward(prices, horizons):
-    """
-    Forward-looking trend-scanning: for each point, scan multiple horizons
-    and pick the one with max |t-value|.
-
-    Returns: (best_tval, best_L, direction) arrays of length len(prices)
-    """
     n = len(prices)
     max_L = max(horizons)
 
@@ -95,7 +65,6 @@ def trend_scan_forward(prices, horizons):
             continue
         n_windows = n - L + 1
 
-        # Stride trick for windows
         windows = np.lib.stride_tricks.as_strided(
             p, shape=(n_windows, L),
             strides=(p.strides[0], p.strides[0])
@@ -103,7 +72,6 @@ def trend_scan_forward(prices, horizons):
 
         tvals = vectorized_tval(windows, L)
 
-        # Update where |t_val| > current best (points 0..n_windows-1)
         for i in range(n_windows):
             if abs(tvals[i]) > abs(best_tval[i]):
                 best_tval[i] = tvals[i]
@@ -113,14 +81,7 @@ def trend_scan_forward(prices, horizons):
 
     return best_tval, best_L, best_dir, valid_mask
 
-
 def trend_features_backward(prices, horizons):
-    """
-    Backward-looking trend features: for each point, compute trend stats
-    over past L bars.
-
-    Returns: dict of feature arrays, each of length len(prices)
-    """
     n = len(prices)
     p = prices.astype(np.float64)
 
@@ -131,7 +92,7 @@ def trend_features_backward(prices, horizons):
             tval = np.full(n, np.nan)
             r2 = np.full(n, np.nan)
         else:
-            # Windows ending at each point (backward-looking)
+
             n_windows = n - L + 1
             windows = np.lib.stride_tricks.as_strided(
                 p, shape=(n_windows, L),
@@ -140,7 +101,6 @@ def trend_features_backward(prices, horizons):
 
             tvals = vectorized_tval(windows, L)
 
-            # R² of linear fit
             x = np.arange(L, dtype=np.float64)
             x_mean = x.mean()
             SXX = ((x - x_mean) ** 2).sum()
@@ -152,7 +112,6 @@ def trend_features_backward(prices, horizons):
             SS_tot = ((windows - y_mean) ** 2).sum(axis=1)
             r2_vals = np.where(SS_tot > 1e-12, 1 - SS_res / SS_tot, 0.0)
 
-            # Pad: first L-1 points don't have full backward window
             tval = np.full(n, np.nan)
             tval[L-1:] = tvals
             r2 = np.full(n, np.nan)
@@ -161,7 +120,6 @@ def trend_features_backward(prices, horizons):
         features[f'trend_tval_{L}h'] = tval
         features[f'trend_r2_{L}h'] = r2
 
-    # Best backward horizon (max |t_val| among backward horizons)
     tval_matrix = np.column_stack([features[f'trend_tval_{L}h'] for L in horizons])
     abs_tvals = np.abs(tval_matrix)
     abs_tvals = np.where(np.isnan(abs_tvals), -1, abs_tvals)
@@ -178,10 +136,6 @@ def trend_features_backward(prices, horizons):
 
     return features
 
-
-# ============================================================
-# 2. LOAD DATA + BUILD SEQUENCES
-# ============================================================
 print("\n=== 1. Loading data ===")
 sys.stdout.flush()
 
@@ -194,12 +148,12 @@ N_BASE_FEATURES = 4
 
 t0 = time.time()
 
-all_X_base = []      # base features (price, ret, vol, momentum)
-all_X_trend = []     # trend features (backward-looking)
-all_y_fixed = []     # fixed 12h labels
-all_y_adaptive = []  # adaptive trend-scanning labels
-all_tval_fwd = []    # forward t-value (for filter experiment)
-all_best_L_fwd = []  # forward optimal horizon
+all_X_base = []
+all_X_trend = []
+all_y_fixed = []
+all_y_adaptive = []
+all_tval_fwd = []
+all_best_L_fwd = []
 n_skipped = 0
 
 grouped = prices.groupby('token_id')['price']
@@ -213,21 +167,15 @@ for idx, (token, price_series) in enumerate(grouped):
         n_skipped += 1
         continue
 
-    # --- Base features (same as focal loss) ---
     ret = np.empty_like(p); ret[0] = 0; ret[1:] = np.diff(p)
     vol = pd.Series(ret).rolling(12, min_periods=1).std().values.astype(np.float32)
     ma12 = pd.Series(p).rolling(12, min_periods=1).mean().values.astype(np.float32)
     momentum = p - ma12
     base_features = np.column_stack([p, ret, vol, momentum])
 
-    # --- Backward trend features ---
     trend_feats = trend_features_backward(p, BACK_HORIZONS)
     trend_arr = np.column_stack([trend_feats[k] for k in sorted(trend_feats.keys())])
-    # trend features: trend_best_L, trend_best_tval, trend_r2_6h, trend_r2_12h,
-    # trend_r2_24h, trend_r2_48h, trend_strength, trend_tval_6h, trend_tval_12h,
-    # trend_tval_24h, trend_tval_48h
 
-    # --- Forward trend-scanning for labels ---
     fwd_tval, fwd_L, fwd_dir, fwd_valid = trend_scan_forward(p, HORIZONS_SCAN)
 
     T = len(p)
@@ -236,7 +184,6 @@ for idx, (token, price_series) in enumerate(grouped):
         n_skipped += 1
         continue
 
-    # Create sliding windows for base features
     strides = base_features.strides
     X_base_windows = np.lib.stride_tricks.as_strided(
         base_features,
@@ -244,23 +191,17 @@ for idx, (token, price_series) in enumerate(grouped):
         strides=(strides[0], strides[0], strides[1])
     ).copy()
 
-    # Trend features at the END of each window (current time)
-    # Window i uses prices[i:i+WINDOW], so "current" = position i+WINDOW-1
     current_positions = np.arange(n_seq) + WINDOW - 1
-    X_trend_current = trend_arr[current_positions]  # (n_seq, n_trend_features)
+    X_trend_current = trend_arr[current_positions]
 
-    # --- Fixed 12h labels ---
     current_p = p[current_positions]
     future_p_12h = p[current_positions + HORIZON]
     y_fixed = (future_p_12h > current_p).astype(np.float32)
 
-    # --- Adaptive labels from forward trend-scanning ---
-    # At position i+WINDOW-1, the forward scan gives direction
     y_adaptive = np.where(fwd_dir[current_positions] > 0, 1.0, 0.0).astype(np.float32)
     tval_fwd = fwd_tval[current_positions]
     best_L_fwd_arr = fwd_L[current_positions]
 
-    # Filter valid (no NaN in base or trend features)
     valid_base = ~np.isnan(X_base_windows.reshape(n_seq, -1)).any(axis=1)
     valid_trend = ~np.isnan(X_trend_current).any(axis=1)
     valid = valid_base & valid_trend & fwd_valid[current_positions]
@@ -300,37 +241,30 @@ print(f"Adaptive labels: UP={y_adaptive.mean():.1%}, DOWN={1-y_adaptive.mean():.
 print(f"Agreement fixed vs adaptive: {(y_fixed == y_adaptive).mean():.1%}")
 sys.stdout.flush()
 
-# Forward scan stats
 print(f"\nForward scan stats:")
 print(f"  |t_val| mean={np.abs(tval_fwd).mean():.2f}, median={np.median(np.abs(tval_fwd)):.2f}")
 print(f"  Best L distribution: {dict(zip(*np.unique(best_L_fwd, return_counts=True)))}")
 sys.stdout.flush()
 
-# ============================================================
-# 3. PREPARE FOR LGB
-# ============================================================
 print("\n=== 2. Prepare LGB features ===")
 sys.stdout.flush()
 
-# Flatten base features: (n, 48, 4) → (n, 192) — last-step summary features
-# Use summary stats instead of raw 192 dims for fair comparison
 def summarize_window(X_windows):
-    """Extract summary features from (n, 48, 4) windows"""
     n = X_windows.shape[0]
     feats = []
     names = []
 
     for f_idx, f_name in enumerate(['price', 'return', 'volatility', 'momentum']):
-        col = X_windows[:, :, f_idx]  # (n, 48)
-        feats.append(col[:, -1])  # last value
+        col = X_windows[:, :, f_idx]
+        feats.append(col[:, -1])
         names.append(f'{f_name}_last')
-        feats.append(col.mean(axis=1))  # mean
+        feats.append(col.mean(axis=1))
         names.append(f'{f_name}_mean')
-        feats.append(col.std(axis=1))  # std
+        feats.append(col.std(axis=1))
         names.append(f'{f_name}_std')
-        feats.append(col[:, -1] - col[:, 0])  # change over window
+        feats.append(col[:, -1] - col[:, 0])
         names.append(f'{f_name}_change')
-        feats.append(col[:, -1] - col.mean(axis=1))  # deviation from mean
+        feats.append(col[:, -1] - col.mean(axis=1))
         names.append(f'{f_name}_dev')
 
     return np.column_stack(feats), names
@@ -338,17 +272,14 @@ def summarize_window(X_windows):
 X_summary, summary_names = summarize_window(X_base)
 print(f"Summary features: {len(summary_names)} ({summary_names[:5]}...)")
 
-# Trend feature names
-trend_names = sorted(trend_feats.keys())  # from last token, but same for all
+trend_names = sorted(trend_feats.keys())
 print(f"Trend features: {len(trend_names)} ({trend_names[:5]}...)")
 
-# Combined
 X_combined = np.hstack([X_summary, X_trend])
 all_names = summary_names + trend_names
 print(f"Combined: {X_combined.shape[1]} features")
 sys.stdout.flush()
 
-# Time-based split
 n = len(X_combined)
 train_end = int(n * 0.70)
 val_end = int(n * 0.85)
@@ -362,9 +293,6 @@ print(f"\nSplit: Train={train_end:,} | Val={val_end-train_end:,} | Test={n-val_e
 print(f"Train UP: {y_fixed[:train_end].mean():.1%} | Test UP: {y_fixed[val_end:].mean():.1%}")
 sys.stdout.flush()
 
-# ============================================================
-# 4. EXPERIMENT 1: Trend features improve LGB?
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 1: LGB + Trend Features")
 print("=" * 70)
@@ -387,7 +315,6 @@ LGB_PARAMS = {
 
 results = {}
 
-# --- 1a: LGB baseline (summary features only, fixed labels) ---
 print("\n--- 1a: LGB Baseline (20 summary features, fixed 12h labels) ---")
 sys.stdout.flush()
 X_tr, y_tr, X_va, y_va, X_te, y_te = split_data(X_summary, y_fixed)
@@ -414,7 +341,6 @@ print(f"  Best iter: {model_base.best_iteration}")
 results['lgb_baseline'] = {'auc': auc_base, 'acc': acc_base, 'rec_up': rec_base, 'f1_up': f1_base}
 sys.stdout.flush()
 
-# --- 1b: LGB + trend features (31 features, fixed labels) ---
 print("\n--- 1b: LGB + Trend Features (31 features, fixed 12h labels) ---")
 sys.stdout.flush()
 X_tr, y_tr, X_va, y_va, X_te, y_te = split_data(X_combined, y_fixed)
@@ -442,7 +368,6 @@ print(f"  AUC improvement: {auc_trend - auc_base:+.4f}")
 results['lgb_trend_features'] = {'auc': auc_trend, 'acc': acc_trend, 'rec_up': rec_trend, 'f1_up': f1_trend}
 sys.stdout.flush()
 
-# Feature importance
 imp = pd.DataFrame({
     'feature': all_names,
     'importance': model_trend.feature_importance(importance_type='gain')
@@ -453,15 +378,11 @@ for _, row in imp.head(10).iterrows():
     print(f"    {row['feature']:25s} {row['importance']:10.1f}{marker}")
 sys.stdout.flush()
 
-# ============================================================
-# 5. EXPERIMENT 2: Adaptive vs Fixed Labels
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 2: Adaptive Labels (trend-scanning) vs Fixed 12h")
 print("=" * 70)
 sys.stdout.flush()
 
-# --- 2a: LGB with adaptive labels (summary features) ---
 print("\n--- 2a: LGB Baseline features + ADAPTIVE labels ---")
 sys.stdout.flush()
 X_tr, y_tr, X_va, y_va, X_te, y_te_adaptive = split_data(X_summary, y_adaptive)
@@ -476,12 +397,10 @@ model_adaptive = lgb.train(
     callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)]
 )
 
-# Evaluate on BOTH label sets
 pred_adaptive = model_adaptive.predict(X_te)
 
-# AUC against adaptive labels (what it was trained on)
 auc_adapt_self = roc_auc_score(y_te_adaptive, pred_adaptive)
-# AUC against fixed labels (real forward return)
+
 y_te_fixed = y_fixed[val_end:]
 auc_adapt_vs_fixed = roc_auc_score(y_te_fixed, pred_adaptive)
 
@@ -494,7 +413,6 @@ results['lgb_adaptive_labels'] = {
 }
 sys.stdout.flush()
 
-# --- 2b: LGB with adaptive labels + trend features ---
 print("\n--- 2b: LGB + Trend features + ADAPTIVE labels ---")
 sys.stdout.flush()
 X_tr, y_tr, X_va, y_va, X_te, y_te_adaptive = split_data(X_combined, y_adaptive)
@@ -522,17 +440,13 @@ results['lgb_adaptive_trend'] = {
 }
 sys.stdout.flush()
 
-# ============================================================
-# 6. EXPERIMENT 3: Trend Filter
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 3: Trend Filter (skip low |t_val|)")
 print("=" * 70)
 sys.stdout.flush()
 
-# Use best model's predictions + filter by forward t-value
 tval_test = tval_fwd[val_end:]
-best_pred = pred_trend  # from Exp 1b (best model so far)
+best_pred = pred_trend
 y_te_fixed = y_fixed[val_end:]
 
 thresholds = [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
@@ -567,55 +481,35 @@ for thr in thresholds:
 
 results['filter_by_tval'] = filter_results
 
-# ============================================================
-# 7. EXPERIMENT 4: Horizon-specific analysis
-# ============================================================
 print("\n" + "=" * 70)
 print("EXPERIMENT 4: Which horizon works best?")
 print("=" * 70)
 sys.stdout.flush()
 
-# For each fixed horizon (3,6,12,24,36,48), compute labels and train LGB
 print(f"\n{'Horizon':>8} | {'Train UP%':>9} | {'Test UP%':>8} | {'AUC':>6} | {'Acc':>6}")
 print("-" * 50)
 
 horizon_results = []
 for H in HORIZONS_SCAN:
-    # Recompute labels for this horizon
+
     current_positions_test = np.arange(n - val_end) + WINDOW - 1
-    # We need to recompute from raw prices — but X_summary is already computed
-    # Use fixed labels with different horizons
 
-    # For simplicity, compute on the full arrays
-    # Current price at window end
     n_full = len(X_base)
-    cp = X_base[:, -1, 0]  # last price in window
+    cp = X_base[:, -1, 0]
 
-    # Future price at horizon H
-    # The sequences were built with max(HORIZONS_SCAN) padding,
-    # so we need to get future prices differently.
-    # Actually, the sequences are built so that position i corresponds to
-    # prices[i:i+WINDOW], with current = prices[i+WINDOW-1]
-    # Future at H = prices[i+WINDOW-1+H]
-    # But we only stored X_base and y for the window data.
-
-    # Recompute: we need the original price arrays to get future prices at different horizons
-    # Skip this for now — just use the forward scan results
     pass
 
-# Actually, let's use a simpler approach: check which L values the trend-scan selects
 print(f"\nBest forward horizon distribution (test set):")
 L_test = best_L_fwd[val_end:]
 for L in sorted(HORIZONS_SCAN):
     count = (L_test == L).sum()
     pct = count / len(L_test)
-    # Mean |t_val| for this L
+
     mask = L_test == L
     mean_tval = np.abs(tval_test[mask]).mean() if mask.sum() > 0 else 0
     print(f"  L={L:2d}h: {count:>7,} ({pct:>5.1%}) | mean |t_val|={mean_tval:.2f}")
 sys.stdout.flush()
 
-# Label agreement by horizon
 print(f"\nLabel agreement (adaptive vs fixed 12h) by best_L:")
 for L in sorted(HORIZONS_SCAN):
     mask = L_test == L
@@ -625,9 +519,6 @@ for L in sorted(HORIZONS_SCAN):
     print(f"  L={L:2d}h: {agree:.1%} agreement with fixed 12h")
 sys.stdout.flush()
 
-# ============================================================
-# 8. SUMMARY
-# ============================================================
 print("\n" + "=" * 70)
 print("GRAND SUMMARY")
 print("=" * 70)
@@ -639,7 +530,6 @@ print(f"{'LGB + trend (31 feats, fixed)':<35} | {results['lgb_trend_features']['
 print(f"{'LGB baseline + adaptive labels':<35} | {results['lgb_adaptive_labels']['auc_vs_fixed']:.4f} |   —   |   —  ")
 print(f"{'LGB + trend + adaptive labels':<35} | {results['lgb_adaptive_trend']['auc_vs_fixed']:.4f} |   —   |   —  ")
 
-# Find best filter threshold
 if filter_results:
     best_filter = max(filter_results, key=lambda x: x['auc'])
     print(f"\nBest filter: |t_val|≥{best_filter['threshold']:.1f} → AUC={best_filter['auc']:.4f} ({best_filter['pct_kept']:.0%} kept)")
@@ -648,7 +538,6 @@ print(f"\nTrend features AUC delta: {results['lgb_trend_features']['auc'] - resu
 print(f"Adaptive labels AUC delta: {results['lgb_adaptive_labels']['auc_vs_fixed'] - results['lgb_baseline']['auc']:+.4f}")
 sys.stdout.flush()
 
-# Save results
 output = {
     'experiments': results,
     'filter_by_tval': filter_results,
@@ -659,7 +548,6 @@ output = {
     }
 }
 
-# Convert numpy types for JSON
 def convert_numpy(obj):
     if isinstance(obj, (np.integer,)):
         return int(obj)

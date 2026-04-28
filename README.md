@@ -160,16 +160,6 @@ Permutation test does not correct for multiple testing across strategy variants;
 
 ---
 
-## Transferable Lessons
-
-- **Offline metrics ≠ live performance.** AUC 0.678 + walk-forward 5/5 + permutation p=0.003 still produced a losing live strategy — paper A/B is the only ground truth.
-- **Multiple-testing correction is mandatory.** ~100 strategy variants tried; without DSR, naive CV would have green-lit deployment.
-- **Regime change kills ML in non-stationary markets.** Train on 2024 retail data, deploy in 2026 institutional + fee-bearing regime — the data-generating process changed.
-- **Knowing when to stop is part of the job.** Alternative was burning capital and rationalizing losses; research-stop is a professional skill, not a failure mode.
-- **Negative results need the same rigor as positive ones.** The `inverse`, `sports_only`, `small_markets` configs each isolate one hypothesis — without them, NO-GO would be claim, not conclusion.
-
----
-
 ## Hybrid Pipeline: Rule-Based + ML
 
 ```
